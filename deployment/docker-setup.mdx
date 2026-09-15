@@ -1,0 +1,258 @@
+---
+title: "Deploy GeoMine with Docker Compose"
+sidebarTitle: "Docker Setup"
+description: "Run the full GeoMine stack — PostgreSQL+PostGIS, FastAPI backend, and Streamlit dashboard — with Docker Compose in three commands."
+---
+
+GeoMine ships as a fully containerised stack. A single `docker-compose.yml` file orchestrates three services — a PostGIS-enabled PostgreSQL database, a FastAPI backend, and a Streamlit dashboard — and automatically seeds the database with historical drilling events, RAG embeddings schema, and OCR upgrade tables on first boot. No manual database setup is required.
+
+## Prerequisites
+
+Before you start, make sure the following are in place on your host machine:
+
+<CardGroup cols={2}>
+  <Card title="Docker Engine 20+" icon="docker">
+    Any recent Docker Desktop or Docker Engine release supports Compose v2. Run `docker --version` to confirm.
+  </Card>
+  <Card title="Docker Compose v2" icon="layer-group">
+    Compose v2 ships bundled with Docker Desktop. On Linux, install the `docker-compose-plugin` package. Run `docker compose version` to verify.
+  </Card>
+  <Card title="4 GB RAM minimum" icon="memory">
+    The database, backend, and dashboard all run concurrently. 4 GB is the recommended floor; 8 GB is comfortable for development.
+  </Card>
+  <Card title="Gemini API Key (optional)" icon="key">
+    Required only for live AI-powered risk scoring and RAG queries. The platform runs in offline mode with mock intelligence when no key is provided.
+  </Card>
+</CardGroup>
+
+## Service Architecture
+
+The `docker-compose.yml` defines three services that form the complete GeoMine stack:
+
+<CardGroup cols={3}>
+  <Card title="db — geomine_db" icon="database">
+    PostgreSQL 15 + PostGIS 3.4 + pgvector. Exposed on port **5432**. Drill data persisted to the `pgdata` named volume. Auto-seeds from four SQL files on first boot.
+  </Card>
+  <Card title="backend — geomine_backend" icon="server">
+    FastAPI served by Uvicorn. Exposed on port **8000**. Depends on `db`. The project directory is bind-mounted to `/app` for live code reloading during development.
+  </Card>
+  <Card title="dashboard — geomine_dashboard" icon="chart-line">
+    Streamlit UI. Exposed on port **8501**. Depends on `backend`. Reaches the API at `http://backend:8000` over the Docker internal network.
+  </Card>
+</CardGroup>
+
+The complete `docker-compose.yml` is shown below. All port bindings, environment variables, volume mounts, and restart policies come directly from this file:
+
+```yaml
+version: '3.8'
+
+services:
+  # 1. Database (PostgreSQL + PostGIS)
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile.db
+    container_name: geomine_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nwis_wells_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Auto-seed the database on first boot
+      - ./historical_drilling_events.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./02_round2_upgrades.sql:/docker-entrypoint-initdb.d/02_upgrade.sql
+      - ./rag/03_rag_embeddings.sql:/docker-entrypoint-initdb.d/03_rag_embeddings.sql
+      - ./04_ocr_schema_upgrades.sql:/docker-entrypoint-initdb.d/04_ocr_schema_upgrades.sql
+    restart: unless-stopped
+
+  # 2. FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: geomine_backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - DB_HOST=db
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=nwis_wells_db
+      - DB_PORT=5432
+      - OLLAMA_URL=http://host.docker.internal:11434/api/generate
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    volumes:
+      # Mount current directory to /app for live reloading during dev
+      - .:/app
+    restart: unless-stopped
+
+  # 3. Streamlit Dashboard
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: geomine_dashboard
+    environment:
+      # Tell Streamlit how to reach the backend container
+      - BACKEND_URL=http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+```
+
+## Build and Start
+
+<Steps>
+  <Step title="Clone the repository and enter the project directory">
+    ```bash
+    git clone <your-geomine-repo-url>
+    cd geomine
+    ```
+  </Step>
+  <Step title="(Optional) Set your Gemini API key">
+    Export the key in your shell, or create a `.env` file — see [Environment Variables](/deployment/environment-variables) for the full reference.
+
+    ```bash
+    export GEMINI_API_KEY=your_api_key_here
+    ```
+  </Step>
+  <Step title="Build images and start all services in detached mode">
+    ```bash
+    docker compose up --build -d
+    ```
+
+    Docker builds the three images in dependency order (`db` → `backend` → `dashboard`) and starts the containers. The first build typically takes two to four minutes while Python dependencies are installed.
+  </Step>
+  <Step title="Tail the logs to watch startup progress">
+    ```bash
+    # Follow all services
+    docker compose logs -f
+
+    # Follow only the backend
+    docker compose logs -f backend
+
+    # Follow only the database (useful to confirm seeding)
+    docker compose logs -f db
+    ```
+  </Step>
+</Steps>
+
+## Database Auto-Seeding
+
+The `db` service mounts four SQL files into PostgreSQL's `docker-entrypoint-initdb.d` directory. PostgreSQL executes every file in that directory **alphabetically** when the data volume is empty (i.e., on first boot). The seeding order and purpose of each file are:
+
+| Order | Mounted As | Source File | What It Creates |
+|-------|-----------|-------------|-----------------|
+| 1 | `01_init.sql` | `historical_drilling_events.sql` | `postgis` extension, `historical_drilling_events` table with 100 seed rows, primary key, and geometry trigger |
+| 2 | `02_upgrade.sql` | `02_round2_upgrades.sql` | Adds `cause`, `mitigation`, `outcome`, `npt_duration_minutes`, `npt_category` columns to `historical_drilling_events` |
+| 3 | `03_rag_embeddings.sql` | `rag/03_rag_embeddings.sql` | `vector` (pgvector) extension, `historical_event_embeddings` table for storing 768-dim+ vector embeddings |
+| 4 | `04_ocr_schema_upgrades.sql` | `04_ocr_schema_upgrades.sql` | `underground_infrastructure`, `processed_files`, and `ocr_corrections` tables; audit columns on `historical_drilling_events`; file-hash indexes |
+
+<Note>
+  The SQL files are only executed once. If the `pgdata` volume already exists from a previous run, PostgreSQL skips the init scripts entirely. To re-seed from scratch, destroy the volume first with `docker compose down -v`.
+</Note>
+
+## Service Health Checks
+
+After startup, verify each service with these commands:
+
+**FastAPI backend** — should return the status banner:
+
+```bash
+curl http://localhost:8000/
+```
+
+Expected response:
+
+```
+NWIS Backend is ONLINE
+```
+
+**Streamlit dashboard** — open your browser and navigate to:
+
+```
+http://localhost:8501
+```
+
+The GeoMine map interface should load within a few seconds.
+
+**PostgreSQL database** — list all tables to confirm seeding completed successfully:
+
+```bash
+docker exec geomine_db psql -U postgres -d nwis_wells_db -c '\dt'
+```
+
+You should see tables including `historical_drilling_events`, `historical_event_embeddings`, `underground_infrastructure`, `processed_files`, and `ocr_corrections`.
+
+## Stopping and Resetting
+
+**Stop all containers but keep data** (safe for day-to-day use):
+
+```bash
+docker compose down
+```
+
+The `pgdata` volume is preserved. The next `docker compose up` starts immediately without re-seeding.
+
+**Stop all containers and wipe all data** (full reset):
+
+```bash
+docker compose down -v
+```
+
+This destroys the `pgdata` named volume. The next `docker compose up --build` will re-run all four SQL seed files from scratch.
+
+<Warning>
+  All three services use `restart: unless-stopped`. This means Docker automatically restarts them after host reboots or unexpected crashes. On developer machines with limited RAM, this can cause resource contention. If you only need GeoMine occasionally, stop the stack when not in use with `docker compose down`, or set the policy to `no` in your local override file.
+</Warning>
+
+## Local Development Without Docker
+
+You can run the backend and dashboard directly on your host for faster iteration during development.
+
+<Steps>
+  <Step title="Install backend dependencies">
+    ```bash
+    pip install -r requirements.txt
+    ```
+  </Step>
+  <Step title="Set required environment variables">
+    ```bash
+    export DB_HOST=127.0.0.1
+    export DB_PORT=5432
+    export DB_USER=postgres
+    export DB_PASSWORD=postgres
+    export DB_NAME=nwis_wells_db
+    export GEMINI_API_KEY=your_api_key_here   # optional
+    ```
+  </Step>
+  <Step title="Start the FastAPI backend with live reload">
+    ```bash
+    uvicorn main:app --reload --port 8000
+    ```
+  </Step>
+  <Step title="In a separate terminal, start the Streamlit dashboard">
+    ```bash
+    streamlit run nwis_dashboard/app.py
+    ```
+
+    The dashboard will be available at `http://localhost:8501` and will connect to the backend at `http://localhost:8000` by default.
+  </Step>
+</Steps>
+
+<Tip>
+  When running locally, ensure your PostgreSQL instance has PostGIS and pgvector installed, and that you have applied all four SQL schema files in order. See the [Database Schema](/deployment/database-schema) page for the full initialisation reference.
+</Tip>

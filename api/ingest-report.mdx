@@ -1,0 +1,100 @@
+---
+title: "POST /api/ingest_report — Text Report Ingestion with Gemini Extraction"
+sidebarTitle: "POST /ingest_report"
+description: "Ingest raw drilling report text: Gemini extracts structured well_id, depth, formation, event_type, cause, mitigation, and outcome, then inserts into the historical events database."
+---
+
+`POST /api/ingest_report` accepts any raw drilling report as unstructured text and uses the Gemini LLM as a structured data extraction engine. The model is prompted to parse the seven canonical drilling-event fields from the free-form text and return them as a strict JSON object. The extracted record is then inserted into the `historical_drilling_events` PostgreSQL table, and the in-memory events cache is immediately invalidated so the new entry is visible to subsequent `/api/analyze_risk` and `/api/search_knowledge` calls without restarting the server.
+
+## Request
+
+`POST /api/ingest_report`
+
+<ParamField body="raw_text" type="string" required>
+  The full text of the drilling report to be processed. Can be any length — a daily drilling report, end-of-well summary, morning report narrative, or operator remarks. Gemini will extract the seven structured fields from whatever context it can identify in the text.
+
+  **Example:** `"Well OIL-5501: At 2840m in the Tipam Formation, we observed a sudden torque spike from 3100 to 6400 ft-lbs accompanied by a 40% ROP drop. Mud weight was 1.52 sg. Pumped a 30bbl HiVis sweep and back-reamed 200m to clear the packoff. Resumed normal drilling after 6 hours."`
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/ingest_report \
+  -H "Content-Type: application/json" \
+  -d '{
+    "raw_text": "Well OIL-5501: At 2840m in the Tipam Formation, we observed a sudden torque spike from 3100 to 6400 ft-lbs accompanied by a 40% ROP drop. Mud weight was 1.52 sg. Pumped a 30bbl HiVis sweep and back-reamed 200m to clear the packoff. Resumed normal drilling after 6 hours."
+  }'
+```
+
+## Extraction Schema
+
+Gemini is instructed to return a single raw JSON object (no markdown, no code fences) with the following seven keys. The prompt explicitly forbids markdown formatting to ensure clean `json.loads()` parsing. Any markdown code blocks the LLM produces are stripped before parsing.
+
+| JSON Key | Type | Description |
+|----------|------|-------------|
+| `well_id` | string | Identifier of the well referenced in the report |
+| `depth_m` | float | Depth in metres at which the event occurred |
+| `formation` | string | Geological formation name; defaults to `"Unknown"` if not determinable |
+| `event_type` | string | Classified event category (see valid values below) |
+| `cause` | string | Brief root-cause description |
+| `mitigation` | string | Action taken to address the event |
+| `outcome` | string | Final result or resolution status |
+
+## Event Types
+
+The Gemini extraction prompt constrains `event_type` to one of the following canonical values. Non-standard values returned by the LLM are stored as-is but may not be recognised by the risk scoring engine's hazard counters.
+
+| event_type | Description |
+|------------|-------------|
+| `"Stuck Pipe"` | Drill string became immovable (differential sticking, packoff, key-seat) |
+| `"Mud Loss"` | Lost circulation or partial loss of drilling fluid to the formation |
+| `"Torque Spike"` | Sudden, abnormal increase in surface torque |
+| `"Kick"` | Formation fluid influx into the wellbore |
+| `"Normal"` | No hazard detected; routine drilling operation |
+
+## Response
+
+<ResponseField name="status" type="string">
+  `"success"` on successful extraction and insertion, or `"error"` if any step fails.
+</ResponseField>
+
+<ResponseField name="inserted_id" type="integer">
+  The auto-incremented primary key (`id`) of the newly inserted row in `historical_drilling_events`.
+</ResponseField>
+
+<ResponseField name="extracted_data" type="object">
+  The full parsed JSON object returned by Gemini, containing all seven extracted fields. Useful for client-side display or audit confirmation.
+</ResponseField>
+
+### Example Response
+
+```json
+{
+  "status": "success",
+  "inserted_id": 147,
+  "extracted_data": {
+    "well_id": "OIL-5501",
+    "depth_m": 2840.0,
+    "formation": "Tipam Formation",
+    "event_type": "Torque Spike",
+    "cause": "Packoff due to poor hole cleaning and cuttings accumulation",
+    "mitigation": "30bbl HiVis sweep pumped, back-reamed 200m",
+    "outcome": "Resumed normal drilling after 6 hours"
+  }
+}
+```
+
+### Error Response
+
+```json
+{
+  "status": "error",
+  "message": "connection to server at \"db\" (172.18.0.3), port 5432 failed: FATAL: password authentication failed for user \"postgres\""
+}
+```
+
+<Note>
+  After a successful insert, the endpoint invalidates the in-memory events cache by setting `data_loader._events_cache = None` and `data_loader._cache_timestamp = 0`. This means the very next call to `/api/analyze_risk` or `/api/search_knowledge` will reload all events from PostgreSQL — including the newly ingested record — without requiring a server restart.
+
+  Records are inserted with a default geographic position of `lat: 27.35, lon: 95.35` when coordinates are not present in the report text. Provide a more specific report or follow up with a `PATCH /api/ocr_correction` call to update the latitude and longitude fields if accurate spatial positioning is required.
+</Note>

@@ -1,20 +1,81 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "GeoMine: AI-Powered Drilling Risk & Spatial Intelligence"
+sidebarTitle: "Home"
+description: "GeoMine (NWIS) is an AI-powered platform that combines real-time telemetry, ML risk prediction, RAG historical intelligence, and GIS spatial analysis to prevent downhole drilling hazards."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+GeoMine is the **Nearby Wells Intelligence System (NWIS)** — a real-time drilling risk platform that fuses machine learning, retrieval-augmented generation (RAG), GIS spatial filtering, and LLM-powered analysis to help drilling engineers identify and mitigate hazards before they escalate. Built for oil and gas operations in the Assam Shelf and similar basins, GeoMine processes live surface telemetry against a repository of historical offset well incidents to deliver actionable, context-aware risk assessments.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Deploy GeoMine with Docker Compose and run your first risk analysis in minutes.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand how the ML engine, RAG pipeline, GIS filter, and dashboard fit together.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore all REST endpoints and the real-time WebSocket telemetry stream.
+  </Card>
+  <Card title="Core Modules" icon="cubes" href="/modules/ml-risk-engine">
+    Deep-dive into the ML risk engine, historical intelligence, OCR pipeline, and more.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What GeoMine Does
+
+GeoMine ingests live drilling parameters — depth, ROP, RPM, torque, and WOB — and runs them through a multi-layer analysis pipeline:
+
+<Steps>
+  <Step title="ML Risk Scoring">
+    A scikit-learn classifier trained on historical stuck pipe events scores current telemetry against five features and returns a risk level (SAFE → CRITICAL) with a 0–99 composite score.
+  </Step>
+  <Step title="GIS Spatial Filtering">
+    Haversine distance queries identify offset wells within a configurable radius (default 5 km) around the active rig, loading their historical event records from PostgreSQL + PostGIS.
+  </Step>
+  <Step title="RAG Historical Intelligence">
+    A retrieval-augmented generation pipeline (in-memory or pgvector backend, Gemini embeddings) matches the current depth and formation against past incidents to surface the most relevant analog evidence.
+  </Step>
+  <Step title="AI Summary & Mitigation">
+    Google Gemini synthesizes the retrieved evidence into a plain-language operational directive with recommended mitigations, displayed in the Streamlit dashboard's live SCADA interface.
+  </Step>
+</Steps>
+
+## Key Capabilities
+
+<CardGroup cols={3}>
+  <Card title="Stuck Pipe Prediction" icon="triangle-exclamation">
+    ML model with risk levels: SAFE, MEDIUM, HIGH, CRITICAL — based on ROP, RPM, torque, WOB, and depth.
+  </Card>
+  <Card title="GIS Offset Well Search" icon="map-location-dot">
+    Configurable 1–50 km spatial buffer with Haversine distance filtering against a PostGIS well repository.
+  </Card>
+  <Card title="RAG Knowledge Search" icon="magnifying-glass">
+    Natural language queries over historical drilling events using Gemini embeddings and hybrid retrieval.
+  </Card>
+  <Card title="OCR Document Ingestion" icon="file-import">
+    Upload PDFs, DOCX, XLSX, or images to auto-extract drilling event data using PyMuPDF, Tesseract, and Ollama/Gemini.
+  </Card>
+  <Card title="Real-Time WebSocket" icon="bolt">
+    Stream live telemetry per well and receive stick-slip (MSE) alerts from the physics engine in real time.
+  </Card>
+  <Card title="NPT Financial Analytics" icon="chart-line">
+    Compare current Non-Productive Time against historical averages to quantify potential cost savings (₹/hr).
+  </Card>
+</CardGroup>
+
+## System Components
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Backend API | FastAPI + Uvicorn | REST endpoints, WebSocket, request validation |
+| ML Engine | scikit-learn, joblib | Stuck pipe risk scoring |
+| Historical Intelligence | Gemini + pgvector/in-memory RAG | Offset well evidence retrieval |
+| GIS Engine | PostGIS, Haversine math | Spatial well filtering |
+| OCR Pipeline | PyMuPDF, Tesseract, Ollama | Document data extraction |
+| Dashboard | Streamlit, Folium, Altair | Interactive SCADA interface |
+| Database | PostgreSQL 18 + PostGIS | Well event repository |
+| Deployment | Docker Compose | Three-container stack (db, backend, dashboard) |
+
+<Note>
+GeoMine was developed for the Smart India Hackathon 2026. The system includes both a live production mode (PostgreSQL + Gemini API) and a fully offline fallback mode using cached mock events and pre-computed embeddings.
+</Note>

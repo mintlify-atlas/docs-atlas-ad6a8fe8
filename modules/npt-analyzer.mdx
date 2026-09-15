@@ -1,0 +1,193 @@
+---
+title: "NPT Financial Analytics: Non-Productive Time Cost Engine"
+sidebarTitle: "NPT Analyzer"
+description: "calculate_npt_insights() compares current well Non-Productive Time against historical offset well averages to quantify financial impact at ₹20 lakh/day drilling rate."
+---
+
+Non-Productive Time (NPT) is the single largest controllable cost driver in oil and gas drilling operations. Any hour the rig is not making hole — whether due to stuck pipe, lost circulation, equipment failure, or well control events — accumulates at the full day rate. The NWIS NPT Analyzer quantifies this cost in real time, benchmarks it against the historical average NPT from comparable offset wells within the search radius, and surfaces the financial upside of closing the gap. This gives drilling engineers and operations managers an immediate, currency-denominated case for early intervention.
+
+## `calculate_npt_insights()` Function
+
+The function is defined in `nwis-historical-intelligence/src/npt_analyzer.py` and is imported directly into `main.py`:
+
+```python
+from npt_analyzer import calculate_npt_insights
+```
+
+**Full function signature:**
+
+```python
+def calculate_npt_insights(current_npt_minutes: int, comparable_events: list) -> dict:
+    """
+    Takes the current well's NPT duration and compares it against historical offset wells.
+    Calculates the financial cost and potential savings.
+    """
+```
+
+<ParamField path="current_npt_minutes" type="int" required>
+  The current well's total Non-Productive Time in minutes, submitted by the operator via `POST /api/analyze_npt`.
+</ParamField>
+
+<ParamField path="comparable_events" type="list" required>
+  A list of historical event dicts, pre-filtered by the GIS Haversine engine to include only wells within the operator's search radius. Each event dict should contain an `npt_duration_minutes` key.
+</ParamField>
+
+**Return fields:**
+
+<ResponseField name="current_npt_hours" type="float">
+  `current_npt_minutes / 60.0` — converted to hours.
+</ResponseField>
+
+<ResponseField name="current_npt_cost" type="float">
+  `current_npt_hours × HOURLY_RATE` — total NPT cost in Indian Rupees (₹).
+</ResponseField>
+
+<ResponseField name="historical_avg_npt_hours" type="float">
+  Average NPT hours across all comparable offset well events that have a non-zero `npt_duration_minutes`. Returns `0.0` if no historical NPT data is available.
+</ResponseField>
+
+<ResponseField name="potential_reduction_hours" type="float">
+  `max(0.0, current_npt_hours - historical_avg_npt_hours)` — how many hours above the historical average the current well is running. Zero if current NPT is at or below average.
+</ResponseField>
+
+<ResponseField name="potential_savings" type="float">
+  `potential_reduction_hours × HOURLY_RATE` — financial value (₹) of closing the NPT gap to the historical average.
+</ResponseField>
+
+<ResponseField name="message" type="str">
+  Human-readable summary: either `"NPT is X hours above historical average."` or `"NPT is within or below historical averages."` If no comparable historical data exists, returns `"No comparable historical NPT data available for offset wells."`
+</ResponseField>
+
+## Rate Assumptions
+
+The financial model uses a fixed drilling day rate defined at the top of `npt_analyzer.py`:
+
+```python
+DRILLING_DAY_RATE = 20_00_000   # ₹20,00,000 (₹20 Lakh) per day
+HOURLY_RATE = DRILLING_DAY_RATE / 24   # ₹83,333.33 per hour
+```
+
+<Note>
+₹20 Lakh/day (`₹20,00,000`) is the prototype assumption for Indian onshore drilling operations. This figure should be adjusted to the actual contract day rate for production deployments.
+</Note>
+
+## Calculation Logic
+
+The function performs three sequential calculations:
+
+**Step 1 — Current well NPT cost:**
+```python
+current_npt_hours = current_npt_minutes / 60.0
+current_npt_cost  = current_npt_hours * HOURLY_RATE
+```
+
+**Step 2 — Historical baseline from comparable offset wells:**
+```python
+historical_npt_minutes_list = [
+    e.get("npt_duration_minutes", 0)
+    for e in comparable_events
+    if e.get("npt_duration_minutes", 0) > 0
+]
+
+avg_historical_npt_minutes = sum(historical_npt_minutes_list) / len(historical_npt_minutes_list)
+avg_historical_npt_hours   = avg_historical_npt_minutes / 60.0
+```
+
+Events with `npt_duration_minutes = 0` or missing the field are excluded from the average. If no comparable events have NPT data, the function returns early with all financial fields set to `0.0`.
+
+**Step 3 — Potential savings (only when current exceeds average):**
+```python
+potential_reduction_hours = max(0.0, current_npt_hours - avg_historical_npt_hours)
+potential_savings         = potential_reduction_hours * HOURLY_RATE
+```
+
+The `max(0.0, ...)` guard ensures that a well performing better than average never reports negative savings.
+
+## API Integration
+
+The `POST /api/analyze_npt` endpoint accepts the current well's NPT duration and rig coordinates, filters comparable events using the GIS Haversine engine, and passes them to `calculate_npt_insights()`:
+
+```python
+@app.post("/api/analyze_npt")
+async def analyze_npt(payload: NPTAnalysisPayload):
+    db_events = load_historical_events()
+
+    # Filter historical events using GIS Haversine engine
+    comparable_events = []
+    for e in db_events:
+        w_lat = e.get("latitude")
+        w_lon = e.get("longitude")
+        if w_lat and w_lon and haversine(payload.lat, payload.lon, w_lat, w_lon) <= payload.search_radius_km:
+            comparable_events.append(e)
+
+    npt_results = calculate_npt_insights(payload.current_npt_minutes, comparable_events)
+    return {"status": "success", "data": npt_results}
+```
+
+**Request payload:**
+
+```python
+class NPTAnalysisPayload(BaseModel):
+    current_npt_minutes: int      # Current well NPT in minutes
+    lat: float                    # Rig latitude
+    lon: float                    # Rig longitude
+    search_radius_km: float = 5.0 # Offset well search radius (default 5 km)
+```
+
+## Python Usage Example
+
+```python
+from npt_analyzer import calculate_npt_insights
+
+# Simulate 12 hours (720 minutes) of NPT on the current well
+current_npt_minutes = 720
+
+# Historical events from nearby offset wells (GIS pre-filtered)
+comparable_events = [
+    {"well_id": "A-17", "npt_duration_minutes": 480},   # 8 hrs
+    {"well_id": "C-04", "npt_duration_minutes": 360},   # 6 hrs
+    {"well_id": "G-33", "npt_duration_minutes": 600},   # 10 hrs
+    {"well_id": "N-40", "npt_duration_minutes": 0},     # excluded (no NPT)
+]
+
+result = calculate_npt_insights(current_npt_minutes, comparable_events)
+print(result)
+```
+
+```json
+{
+  "current_npt_hours": 12.0,
+  "current_npt_cost": 1000000.0,
+  "historical_avg_npt_hours": 8.0,
+  "potential_reduction_hours": 4.0,
+  "potential_savings": 333333.33,
+  "message": "NPT is 4.0 hours above historical average."
+}
+```
+
+**API call:**
+
+```bash
+curl -X POST "http://localhost:8000/api/analyze_npt" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "current_npt_minutes": 720,
+    "lat": 27.35,
+    "lon": 95.32,
+    "search_radius_km": 5.0
+  }'
+```
+
+```json
+{
+  "status": "success",
+  "data": {
+    "current_npt_hours": 12.0,
+    "current_npt_cost": 1000000.0,
+    "historical_avg_npt_hours": 8.0,
+    "potential_reduction_hours": 4.0,
+    "potential_savings": 333333.33,
+    "message": "NPT is 4.0 hours above historical average."
+  }
+}
+```

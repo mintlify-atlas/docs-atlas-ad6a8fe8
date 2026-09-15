@@ -1,0 +1,130 @@
+---
+title: "POST /api/search_knowledge — RAG Drilling Knowledge Search"
+sidebarTitle: "POST /search_knowledge"
+description: "Natural language search over the historical drilling events database using Gemini embeddings and hybrid RAG retrieval, with optional proximity-based filtering."
+---
+
+`POST /api/search_knowledge` exposes the NWIS RAG (Retrieval-Augmented Generation) pipeline as a conversational search interface for drilling engineers. Submit any natural-language question about historical drilling hazards, formations, or well performance, and the endpoint retrieves the most semantically relevant events using Gemini embeddings (with an optional pgvector backend), then synthesises a structured answer via the `HistoricalQueryService`. When the question contains proximity keywords such as `"nearby"` or `"this area"`, results are automatically scoped to the offset wells within the specified radius.
+
+## Request
+
+`POST /api/search_knowledge`
+
+<ParamField body="question" type="string" required>
+  The natural-language question to answer against the historical drilling events database.
+
+  **Example:** `"What caused stuck pipe incidents near this area?"`
+</ParamField>
+
+<ParamField body="lat" type="float" required>
+  Latitude of the search centre in decimal degrees. Used as the anchor for proximity filtering when the question triggers geo-scoping.
+
+  **Example:** `27.35`
+</ParamField>
+
+<ParamField body="lon" type="float" required>
+  Longitude of the search centre in decimal degrees.
+
+  **Example:** `95.32`
+</ParamField>
+
+<ParamField body="radius_km" type="float" default="50.0">
+  Proximity filter radius in kilometres. When the question is detected as proximity-sensitive, only wells within this radius around `(lat, lon)` are included in the RAG retrieval pool.
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/search_knowledge \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What are the most common causes of stuck pipe nearby?",
+    "lat": 27.35,
+    "lon": 95.32,
+    "radius_km": 30.0
+  }'
+```
+
+## Proximity Detection
+
+The endpoint automatically detects whether a question requires proximity-based filtering by checking for any of the following keywords in the lowercased query string:
+
+| Keyword | Example trigger phrase |
+|---------|------------------------|
+| `nearby` | "What happened nearby at 2800m?" |
+| `close by` | "Any kick events close by?" |
+| `around here` | "Show mud losses around here" |
+| `this area` | "Incidents in this area above 3000m" |
+| `this region` | "Torque spikes in this region" |
+| `local` | "Local formation pressures" |
+| `surrounding` | "Surrounding well history" |
+| `radius` | "Wells within radius with stuck pipe" |
+
+When **any** proximity keyword is matched, the RAG retrieval pool is restricted to `valid_well_ids` — those falling within `radius_km` of the provided coordinates. When **no** proximity keyword is matched, the search runs globally across the entire historical events database (all available well IDs are passed as `None` to `HistoricalQueryService`).
+
+## Response
+
+The response structure is returned directly from `HistoricalQueryService.answer_query()`. The top-level keys are:
+
+<ResponseField name="answer" type="string">
+  The Gemini-generated narrative answer to the question, grounded in the retrieved historical events.
+</ResponseField>
+
+<ResponseField name="events" type="array">
+  The top-k (default: 5) most semantically relevant historical events retrieved by the RAG engine. Each item mirrors the structure of a historical drilling event record.
+</ResponseField>
+
+<ResponseField name="error" type="string">
+  Present only on failure. Contains the exception message string.
+</ResponseField>
+
+### Example Response
+
+```json
+{
+  "answer": "Within a 30 km radius of the query coordinates, the most common causes of stuck pipe incidents were differential sticking due to high overbalance pressure (observed in wells OIL-4412 and OIL-3991) and poor hole cleaning at deviated intervals above 2800 m. In three out of five matching events, reducing WOB and circulating HiVis sweeps resolved the sticking within 6–12 hours.",
+  "events": [
+    {
+      "well_id": "OIL-4412",
+      "depth_m": 2745.0,
+      "formation": "Formation X",
+      "event_type": "Stuck Pipe",
+      "cause": "Differential sticking due to high overbalance",
+      "mitigation": "Reduced mud weight, jarred free after 8 hours",
+      "outcome": "Resumed drilling without sidetrack"
+    },
+    {
+      "well_id": "OIL-3991",
+      "depth_m": 2810.0,
+      "formation": "Formation X",
+      "event_type": "Stuck Pipe",
+      "cause": "Poor hole cleaning in deviated section",
+      "mitigation": "HiVis sweep and back-reaming",
+      "outcome": "Free within 4 hours"
+    }
+  ]
+}
+```
+
+## Example Queries
+
+The following questions represent typical use cases for field engineers querying the NWIS knowledge base:
+
+1. **Formation-specific hazard history**
+   > `"What drilling problems have been encountered in Formation X between 2700m and 2900m?"`
+
+2. **Proximity-scoped incident search**
+   > `"Have there been any mud loss events nearby in the last year?"`
+
+3. **Mitigation playbook lookup**
+   > `"What mud treatments were used to cure lost circulation in this region?"`
+
+4. **Comparative NPT analysis**
+   > `"Which wells in this area had the longest stuck pipe fishing operations?"`
+
+5. **Formation pressure intelligence**
+   > `"Were there any gas kicks or abnormal pressure indicators around 3000m in surrounding wells?"`
+
+<Note>
+  The RAG backend is configurable via the `RAG_BACKEND` environment variable. Set `RAG_BACKEND=pgvector` to use the PostgreSQL pgvector extension for persistent vector storage and ANN search. The default `RAG_BACKEND=in_memory` loads a pre-computed embedding cache from `nwis_mock_embeddings_cache.json` for offline or development use.
+</Note>

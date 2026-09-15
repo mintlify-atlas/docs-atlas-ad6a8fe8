@@ -1,0 +1,206 @@
+---
+title: "Stuck Pipe ML Risk Scoring Engine"
+sidebarTitle: "ML Risk Engine"
+description: "How GeoMine's scikit-learn classifier scores live drilling telemetry for stuck pipe risk using 5 input features, with Safe Operating Envelope logic and composite risk merging."
+---
+
+GeoMine's ML Risk Engine is the primary real-time decision layer inside the `/api/analyze_risk` pipeline. On every telemetry submission, the engine feeds five live drilling parameters — depth, ROP, RPM, torque, and WOB — into a pre-trained scikit-learn binary classifier that was trained on historical stuck-pipe incidents from the Duliajan field. The classifier returns a probability that is immediately scaled to a 0–99 risk score, classified into one of four hazard levels, and then further merged with spatial analog evidence from offset wells to produce the final composite score that drives the dashboard.
+
+## Model Overview
+
+The model is loaded once at application startup from `ML/stuck_pipe_model.pkl` using `joblib`:
+
+```python
+import joblib
+
+real_ml_model = None
+try:
+    real_ml_model = joblib.load("ML/stuck_pipe_model.pkl")
+    print("✅ Stuck Pipe ML model loaded successfully.")
+except Exception as e:
+    print(f"⚠️ Failed to load stuck_pipe_model.pkl: {e}")
+```
+
+When a prediction is requested, the five features are packaged into a single-row `pandas.DataFrame` and passed to `predict_proba()`. The probability of the positive class (stuck pipe) is multiplied by 100 to yield `risk_score`:
+
+```python
+risk_score = float(real_ml_model.predict_proba(input_data)[0, 1] * 100)
+```
+
+If `joblib` or `pandas` are unavailable, or if loading the `.pkl` file fails for any reason, the engine automatically falls back to `predict_risk_mock()`.
+
+## Input Features
+
+All five features come directly from the `TelemetryPayload` Pydantic model submitted via `POST /api/analyze_risk`:
+
+| Field | Unit | Description | Validation |
+|-------|------|-------------|------------|
+| `depth` | metres (m) | Current measured depth of the drill bit | `> 0` (required) |
+| `rop` | m/hr | Rate of Penetration — how fast the bit is advancing | `>= 0` |
+| `rpm` | rev/min | Rotary speed of the drill string | `>= 0` |
+| `torque` | kN·m | Rotational force applied to the drill string | `>= 0` |
+| `wob` | kN | Weight on Bit — axial load applied through the bit | `>= 0` |
+
+<Note>
+`depth`, `rop`, `rpm`, `torque`, and `wob` are the **exact five feature column names** expected by the trained model. Any rename will break inference. The other fields in `TelemetryPayload` (`lat`, `lon`, `target_formation`, etc.) are used for GIS filtering and are not fed to the ML model.
+</Note>
+
+## Safe Operating Envelope Override
+
+The raw scikit-learn classifier can be over-sensitive when all drilling parameters fall comfortably within the field's defined safe operating windows. To prevent the dashboard from displaying alarming risk scores during stable operations, `predict_risk()` applies a **UI Consistency Override**:
+
+If all four parameters satisfy the Safe Operating Envelope simultaneously, the raw ML score is scaled down proportionally so it fluctuates naturally with telemetry rather than spiking artificially:
+
+```python
+is_ui_safe = (
+    (5.0 <= d_rop <= 25.0) and
+    (60.0 <= d_rpm <= 150.0) and
+    (1000.0 <= d_tor <= 5000.0) and
+    (4.0 <= d_wob <= 20.0)
+)
+
+if is_ui_safe:
+    import random
+    risk_score = (risk_score * 0.15) + random.uniform(1.2, 4.5)
+```
+
+The four Safe Operating Envelope boundaries are:
+
+| Parameter | Safe Min | Safe Max |
+|-----------|----------|----------|
+| ROP | 5.0 m/hr | 25.0 m/hr |
+| RPM | 60.0 rev/min | 150.0 rev/min |
+| Torque | 1,000 kN·m | 5,000 kN·m |
+| WOB | 4.0 kN | 20.0 kN |
+
+<Tip>
+The `× 0.15` scaling factor ensures that even with the override active, the score still moves with the underlying telemetry, providing a realistic "safe zone" readout (typically 1–18 points) rather than a flat constant.
+</Tip>
+
+## Risk Level Classification
+
+After the override is applied, the score is mapped to one of four human-readable hazard levels:
+
+| Threshold | Risk Level | Predicted Event |
+|-----------|------------|-----------------|
+| `score > 75` | `CRITICAL` | Stuck Pipe Warning |
+| `score > 40` | `HIGH` | Elevated Drag |
+| `score > 20` | `MEDIUM` | Deviation Detected |
+| `score ≤ 20` | `SAFE` | Safe Operations |
+
+```python
+if risk_score > 75:
+    level, event = "CRITICAL", "Stuck Pipe Warning"
+elif risk_score > 40:
+    level, event = "HIGH", "Elevated Drag"
+elif risk_score > 20:
+    level, event = "MEDIUM", "Deviation Detected"
+else:
+    level, event = "SAFE", "Safe Operations"
+```
+
+## Mock Fallback Logic
+
+When the model file cannot be loaded, `predict_risk_mock()` provides a fully rules-based deterministic scoring engine. It evaluates conditions in priority order, returning immediately on the most critical conditions:
+
+```python
+def predict_risk_mock(data: dict) -> dict:
+    rop   = data.get("rop", 0)
+    rpm   = data.get("rpm", 0)
+    torque = data.get("torque", 0)
+    wob   = data.get("wob", 0)
+
+    # 1. Critical Over-Torque
+    if torque > 6500:
+        return {"risk_score": 92.5, "risk_level": "CRITICAL",
+                "predicted_event": "Stuck Pipe (Over-Torque)", "is_anomaly": True}
+
+    # 2. String Buckling (High WOB)
+    if wob > 28.0:
+        return {"risk_score": 89.0, "risk_level": "CRITICAL",
+                "predicted_event": "String Buckling (Over-Weight)", "is_anomaly": True}
+
+    # 3. Accumulated Medium/High Risks
+    score = 0.0
+    if torque > 5000:  score += 45   # HIGH — Elevated Drag
+    if rop < 5.0:      score += 35   # MEDIUM — Pack-off Risk
+    if rpm < 60.0:     score += 30   # MEDIUM — Sticking Risk
+    if rop > 35.0:     score += 40   # HIGH — Washout/Vibration
+
+    if score > 0:
+        return {"risk_score": min(88.0, 40.0 + score), ...}
+
+    return {"risk_score": 0.0, "risk_level": "SAFE", ...}
+```
+
+<Warning>
+The mock thresholds (`torque > 6500`, `wob > 28`) are hard-coded engineering limits based on Duliajan field operational experience. Do **not** adjust them without consulting the drilling engineering team.
+</Warning>
+
+## Composite Risk Score
+
+After the ML engine returns its base score, the `/api/analyze_risk` endpoint merges it with analog hazard counts from spatially-filtered offset wells. This composite score reflects both real-time telemetry risk **and** historical pattern risk from nearby wells:
+
+| Analog Hazard | Score Added (per occurrence) | Bonus when telemetry unsafe |
+|---------------|-----------------------------|-----------------------------|
+| Stuck Pipe | +15.0 | +10.0 |
+| Mud Loss | +10.0 | +8.0 |
+| Torque Spike | +8.0 | +5.0 |
+
+The final score is capped at `99.0` and a small jitter (`±1.5`) is added for realistic dashboard variation:
+
+```python
+final_risk_score += (stuck_pipes * 15.0)
+final_risk_score += (mud_losses * 10.0)
+final_risk_score += (torque_spikes * 8.0)
+final_risk_score += random.uniform(-1.5, 1.5)
+final_risk_score = min(final_risk_score, 99.0)
+```
+
+The risk level is then re-classified against the composite score using adjusted thresholds (`>75` → CRITICAL, `>50` → HIGH, `>30` → MEDIUM).
+
+## API Usage Example
+
+```python
+import requests
+
+payload = {
+    "location_area": "Duliajan Sector 4",
+    "lat": 27.35,
+    "lon": 95.32,
+    "target_formation": "Formation X",
+    "depth": 2800.0,
+    "rop": 18.5,
+    "rpm": 95.0,
+    "torque": 3200.0,
+    "wob": 12.0,
+    "search_radius_km": 5.0,
+    "depth_window": 80.0,
+    "enable_ai": True
+}
+
+response = requests.post("http://localhost:8000/api/analyze_risk", json=payload)
+result = response.json()
+
+print(result["ml_prediction"]["risk_score"])   # e.g. 24.7
+print(result["ml_prediction"]["risk_level"])   # e.g. "MEDIUM"
+print(result["ml_prediction"]["predicted_event"])  # e.g. "Deviation Detected"
+```
+
+```json
+{
+  "status": "success",
+  "analysis_timestamp": "2024-11-15T08:32:10Z",
+  "ml_prediction": {
+    "risk_score": 24.7,
+    "risk_level": "MEDIUM",
+    "predicted_event": "Deviation Detected"
+  },
+  "historical_context": {
+    "nearby_wells_analyzed": 5,
+    "stuck_pipe_count": 2,
+    "mud_loss_count": 1,
+    "torque_spike_count": 0
+  }
+}
+```

@@ -1,0 +1,152 @@
+---
+title: "GeoMine System Architecture and Data Flow"
+sidebarTitle: "Architecture"
+description: "How GeoMine's ML engine, GIS spatial filter, RAG pipeline, OCR ingestion, and Streamlit dashboard interact through the FastAPI backend hub."
+---
+
+GeoMine is deployed as a three-container Docker Compose application. The `db` container runs PostgreSQL with the PostGIS extension, seeded automatically from four SQL migration scripts on first boot. The `backend` container serves the FastAPI application via Uvicorn on port 8000, acting as the central orchestration hub for every intelligence layer. The `dashboard` container runs the Streamlit front-end on port 8501, communicating with the backend exclusively through the `BACKEND_URL=http://backend:8000` environment variable — keeping the presentation layer stateless and independently deployable.
+
+## Docker Services
+
+| Service | Container | Port | Image Base | Role |
+|---|---|---|---|---|
+| `db` | `geomine_db` | `5432` | PostgreSQL + PostGIS (`Dockerfile.db`) | Persistent data store for drilling events, infrastructure records, RAG embeddings, and OCR corrections. Volumes: `pgdata` for persistence, four SQL init scripts auto-run on first start. |
+| `backend` | `geomine_backend` | `8000` | Python 3.12-slim (`Dockerfile.backend`) | FastAPI + Uvicorn hub. Loads the ML model at startup, exposes all `/api/*` endpoints, and orchestrates ML → GIS → RAG → Gemini pipeline. Mounts `.:/app` for live reload during development. |
+| `dashboard` | `geomine_dashboard` | `8501` | Python 3.12-slim (`Dockerfile.dashboard`) | Streamlit application at `nwis_dashboard/app.py`. Renders the risk console, formation map, offset-well table, and AI evidence panel. Depends on `backend`. |
+
+## Request Lifecycle for /api/analyze_risk
+
+When the dashboard submits a drilling telemetry form, or a `curl` call hits `POST /api/analyze_risk`, the FastAPI backend executes the following six-step orchestration sequence.
+
+**Step 1 — Receive and Validate `TelemetryPayload`**
+Pydantic parses and validates the incoming JSON against the `TelemetryPayload` model, enforcing non-negative values for `depth`, `rop`, `rpm`, `torque`, and `wob`, and providing defaults for `search_radius_km` (5.0 km) and `depth_window` (80.0 m).
+
+```python
+class TelemetryPayload(BaseModel):
+    location_area: str
+    lat: float
+    lon: float
+    target_formation: str
+    depth: float          # gt=0
+    rop: float            # ge=0
+    rpm: float            # ge=0
+    torque: float         # ge=0
+    wob: float            # ge=0
+    search_radius_km: float = 5.0
+    depth_window: float = 80.0
+    enable_ai: bool = True
+```
+
+**Step 2 — ML `predict_risk()`**
+The five telemetry features are assembled into a pandas `DataFrame` and passed to the scikit-learn model's `predict_proba()`. The raw probability is scaled to 0–100. If all four parameters are within the Safe Operating Envelope, the score is dampened proportionally before returning to the pipeline.
+
+**Step 3 — GIS Haversine Filter**
+`load_historical_events()` fetches all records from PostgreSQL. For each record, the Haversine formula computes the great-circle distance from the current well coordinates (`payload.lat`, `payload.lon`) to the historical well. Only events within `payload.search_radius_km` produce a matching `well_id`. Any event outside the radius is explicitly dropped with a log entry (`DROPPED WELL {well_id}`).
+
+**Step 4 — `analyze_well()` Historical Intelligence**
+The filtered `valid_well_ids` list and the full `db_events` are passed to `analyze_well()` from `nwis-historical-intelligence/src/intelligence.py`. This function chains three sub-modules: `search_historical_events()` (depth-window and formation filtering with relevance scoring), `analyze_historical_events()` (aggregate statistics), and `generate_evidence()` (deterministic, traceable evidence records). The result includes `historical_events`, `pattern_analysis`, and `evidence`.
+
+**Step 5 — Gemini AI Summary (async, 45 s timeout)**
+When `enable_ai=true`, a `GeminiProvider` instance is created and a `HistoricalAnswerGenerator` is invoked with `generate_answer_async()`. The prompt is trimmed to `pattern_analysis` only to minimise token overhead and API latency. `asyncio.wait_for` enforces a hard 45-second timeout; a timeout yields a warning string rather than an error response.
+
+**Step 6 — Composite Risk Score Merge → `MasterResponse`**
+Analog-well hazard counts (`stuck_pipe_count`, `mud_loss_count`, `torque_spike_count`) from the filtered `ui_wells` list are converted to score penalties:
+
+- **+15** per stuck-pipe analog (+ 10 if ML score ≥ 40)
+- **+10** per mud-loss analog (+ 8 if ML score ≥ 40)
+- **+8** per torque-spike analog (+ 5 if ML score ≥ 40)
+
+A ±1.5 jitter is added for realism and the score is capped at 99.0. Risk level thresholds are re-evaluated on the final composite score. The validated `MasterResponse` is returned.
+
+## Data Layer
+
+GeoMine's PostgreSQL database (`nwis_wells_db`) contains four primary tables, provisioned by the SQL init scripts mounted into the `db` container.
+
+| Table | Key Columns | Purpose |
+|---|---|---|
+| `historical_drilling_events` | `id`, `well_id`, `latitude`, `longitude`, `event_depth`, `formation`, `event_type`, `cause`, `mitigation`, `outcome` | Core repository of past drilling incidents. The GIS Haversine filter and RAG retrieval both operate on this table. |
+| `underground_infrastructure` | `id`, `well_id`, `type`, `depth_m`, `geometry` | Subsurface pipeline and aquifer records. Used by the environmental risk engine. Contains a PostGIS `geometry` column for spatial queries. |
+| `rag_embeddings` | `id`, `text`, `embedding` (pgvector), `metadata` | Stores pre-computed Gemini text embeddings for semantic similarity search when `RAG_BACKEND=pgvector`. Requires the `pgvector` PostgreSQL extension. |
+| `ocr_corrections` | `id`, `record_type`, `record_id`, `field_name`, `old_value`, `new_value`, `created_at` | Audit log of human-in-the-loop corrections submitted via `PATCH /api/ocr_correction`. Feeds future prompt improvement cycles. |
+
+Historical events are loaded at request time by `load_historical_events()` (with a TTL cache). If the database is unreachable, the system falls back to `nwis_mock_historical_events.json` and merges its records with any database rows already retrieved, deduplicating by `(well_id, depth_m)`.
+
+## ML Pipeline
+
+The scikit-learn risk classifier is loaded once at application startup:
+
+```python
+real_ml_model = joblib.load("ML/stuck_pipe_model.pkl")
+```
+
+**Input features (5):** `depth`, `rop`, `rpm`, `torque`, `wob` — all extracted from the `TelemetryPayload` and formatted as a single-row `pd.DataFrame`.
+
+**Safe Operating Envelope override:** If all four guard conditions below are satisfied simultaneously, the raw ML probability is scaled down by a factor of 0.15 plus a small random jitter (1.2–4.5) to reflect realistic safe-operations noise without flatlining at a constant value.
+
+| Parameter | Safe Range |
+|---|---|
+| ROP | 5.0 – 25.0 m/hr |
+| RPM | 60.0 – 150.0 |
+| Torque | 1,000 – 5,000 kN·m |
+| WOB | 4.0 – 20.0 klbs |
+
+**Risk level thresholds (ML base score only):**
+
+| Score Range | Level | Predicted Event |
+|---|---|---|
+| > 75 | `CRITICAL` | Stuck Pipe Warning |
+| > 40 | `HIGH` | Elevated Drag |
+| > 20 | `MEDIUM` | Deviation Detected |
+| ≤ 20 | `SAFE` | Safe Operations |
+
+If `stuck_pipe_model.pkl` cannot be loaded (e.g., during a fresh environment without pre-trained weights), `predict_risk()` automatically falls back to the deterministic `predict_risk_mock()` function, which applies threshold rules directly to the raw telemetry values.
+
+## RAG Backend Modes
+
+The Retrieval-Augmented Generation layer is configurable at runtime via the `RAG_BACKEND` environment variable.
+
+```python
+backend = os.getenv("RAG_BACKEND", "in_memory").strip().lower()
+```
+
+**`in_memory` (default)**
+At first request, `nwis_mock_embeddings_cache.json` is loaded from `nwis-historical-intelligence/`. Each historical event document is looked up in the cache dictionary by its text representation. Cache hits reuse the stored embedding vector directly. For any document not found in the cache, the system attempts to call `GeminiEmbeddingProvider` to compute a live embedding; if that fails (e.g., no API key), a deterministic fallback vector is generated from a character-hash seed, preserving offline operation. The assembled `RAGRetrievalService` uses cosine similarity over these in-memory vectors.
+
+**`pgvector`**
+A `PgVectorRetriever` backed by `PgVectorDatabaseClient` performs ANN (approximate nearest-neighbour) search against the `rag_embeddings` table in PostgreSQL. This mode scales to large event repositories and supports incremental ingestion via `/api/ingest_report`. Switch to this mode by setting `RAG_BACKEND=pgvector` and ensuring the `pgvector` extension is active in the database.
+
+The singleton `_rag_service` is refreshed automatically whenever `RAG_BACKEND` changes value between requests, making it safe to switch modes without restarting the application.
+
+## OCR Ingestion Pipeline
+
+GeoMine provides a multi-tier document ingestion pipeline for converting paper drilling reports into structured database records.
+
+**Tier 1 — Raw Text Ingestion (`POST /api/ingest_report`)**
+Accepts a `raw_text` string. The Gemini LLM extracts seven structured fields (`well_id`, `depth_m`, `formation`, `event_type`, `cause`, `mitigation`, `outcome`) via a zero-shot extraction prompt, returning clean JSON. The parsed record is inserted directly into `historical_drilling_events` and the `data_loader` cache is invalidated so the new event appears immediately in subsequent analyses.
+
+**Tier 2 — Enterprise OCR File Upload (`POST /api/upload_report`)**
+Accepts PDF, DOCX, XLSX, or image file uploads via `multipart/form-data`. The file is saved to a temporary path preserving the original filename for audit trail, then passed to `OCR/ocr_pipeline_ollama.process_single_file()`. This pipeline chains:
+1. **Text extraction** — PyMuPDF (`pymupdf`) for PDFs; Tesseract (`pytesseract`) + Pillow for images
+2. **LLM classification** — Gemini classifies the document and extracts both `drilling_event` and `infrastructure` payloads with confidence scores
+3. **Validation** — Warnings are surfaced for low-confidence extractions
+4. **Optional DB insert** — Controlled by the `insert=true` query parameter
+
+The endpoint returns `document_class`, `drilling_event`, `infrastructure`, `event_confidence`, `infra_confidence`, `warnings`, and the new `db_event_id` / `db_infra_id` if insertion was requested.
+
+**Tier 3 — Human-in-the-Loop Correction (`PATCH /api/ocr_correction`)**
+Engineers can correct wrong OCR extractions by submitting the `record_type` (`drilling_event` or `infrastructure`), `record_id`, `field_name`, `old_value`, and `new_value`. The correction is written to the `ocr_corrections` audit table and immediately applied to the source record via a parameterised `UPDATE` query, closing the feedback loop for future prompt improvement.
+
+<CardGroup cols={2}>
+  <Card title="ML Risk Engine" icon="brain" href="/modules/ml-risk-engine">
+    Full documentation of the stuck-pipe model, feature pipeline, Safe Operating Envelope, and mock fallback logic.
+  </Card>
+  <Card title="RAG & Embeddings" icon="database" href="/modules/rag-retrieval">
+    How GeminiEmbeddingProvider, the in-memory cache, and PgVectorRetriever work together for semantic well search.
+  </Card>
+  <Card title="OCR Pipeline" icon="file-text" href="/modules/ocr-pipeline">
+    PyMuPDF, Tesseract, LLM extraction, and the correction feedback loop explained in detail.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Complete request/response schemas for every endpoint in the NWIS Backend Hub.
+  </Card>
+</CardGroup>

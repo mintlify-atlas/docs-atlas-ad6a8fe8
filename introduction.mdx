@@ -1,0 +1,64 @@
+---
+title: "GeoMine: Real-Time Drilling Risk Intelligence Platform"
+sidebarTitle: "Introduction"
+description: "GeoMine (NWIS) combines ML risk scoring, RAG historical intelligence, GIS spatial filtering, and Gemini AI to prevent stuck pipe and other downhole hazards."
+---
+
+GeoMine, powered by the **Nearby Wells Intelligence System (NWIS)**, is an AI-driven drilling risk platform built for oil and gas operations. Every time a drill bit advances, it faces invisible hazards encoded in the geology and the history of every offset well drilled nearby. Stuck pipe incidents, mud circulation losses, torque spikes, and gas kicks can each cost tens of thousands of dollars per hour in Non-Productive Time (NPT). GeoMine eliminates that blind spot: it ingests live rig telemetry, scores it with a trained scikit-learn model, cross-references it against a spatially indexed repository of historical drilling events, and synthesises a Gemini AI narrative — all in one API call — so drilling engineers receive actionable intelligence before an incident escalates.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Deploy the full GeoMine stack with Docker Compose in under five minutes and run your first risk analysis.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand how the ML engine, GIS filter, RAG pipeline, and Streamlit dashboard connect through the FastAPI hub.
+  </Card>
+  <Card title="ML Risk Engine" icon="brain" href="/modules/ml-risk-engine">
+    Deep dive into the stuck-pipe scikit-learn model, feature engineering, and Safe Operating Envelope override logic.
+  </Card>
+  <Card title="API Overview" icon="code" href="/api/overview">
+    Explore every endpoint: `/api/analyze_risk`, `/api/search_knowledge`, `/api/upload_report`, and more.
+  </Card>
+</CardGroup>
+
+## How NWIS Works
+
+Every risk analysis request passes through a four-layer intelligence pipeline before a response is returned to the drilling engineer.
+
+**Layer 1 — ML Risk Scoring**
+Live telemetry fields (depth, ROP, RPM, torque, WOB) are fed into a pre-trained scikit-learn classifier loaded from `ML/stuck_pipe_model.pkl`. The model returns a probability score scaled to 0–100. A Safe Operating Envelope check then scales the score proportionally when all parameters fall within safe bounds (ROP 5–25 m/hr, RPM 60–150, torque 1,000–5,000 kN·m, WOB 4–20 klbs), preventing false alarms under textbook conditions.
+
+**Layer 2 — GIS Spatial Filter**
+The Haversine formula is applied to every record in the `historical_drilling_events` table. Only wells whose coordinates fall within the user-specified `search_radius_km` advance to the next stage. This ensures that only physically relevant analog wells influence the final risk score.
+
+**Layer 3 — RAG Historical Intelligence**
+The filtered well IDs are passed to `analyze_well()` from the `nwis-historical-intelligence` module. It searches, scores, and aggregates historical events that occurred at comparable depths and formations, producing a structured `pattern_analysis` payload. Semantic similarity is powered by `GeminiEmbeddingProvider`, backed by either an in-memory cache or a PostgreSQL `pgvector` store depending on the `RAG_BACKEND` environment variable.
+
+**Layer 4 — Gemini AI Summary**
+When `enable_ai` is `true`, the `HistoricalAnswerGenerator` sends a concise, grounded prompt to the Gemini API (45-second timeout) and returns a narrative summary that cites specific offset wells, formation names, and recommended mitigations. The system falls back gracefully if the API is unavailable or times out.
+
+## Key Risk Events Detected
+
+GeoMine classifies downhole hazards into four primary event categories, each drawn directly from the historical event repository and scored by the ML engine.
+
+| Event | Description |
+|---|---|
+| **Stuck Pipe** | The drill string becomes immovable due to differential pressure, pack-off, or wellbore collapse. The most costly drilling hazard; GeoMine issues `CRITICAL` alerts when the composite risk score exceeds 75. |
+| **Mud Loss** | Drilling fluid escapes into a porous or fractured formation (e.g., Barail Coal-Shale), reducing hydrostatic pressure and risking a well-control event. Detected via abnormal pump-pressure trends and confirmed by historical analog matches. |
+| **Torque Spike** | A sudden surge in rotary torque indicating borehole friction, ledges, or key-seating. GeoMine flags over-torque conditions (> 6,500 kN·m in mock mode) as immediate `CRITICAL` anomalies. |
+| **Gas Kick** | An influx of formation gas into the wellbore, a precursor to a blowout. Classified alongside stuck-pipe events in the RAG evidence layer and escalated to `CRITICAL` risk level. |
+
+## System Requirements
+
+Before deploying GeoMine, confirm your environment meets these prerequisites.
+
+| Requirement | Details |
+|---|---|
+| **Python** | 3.12 (as specified in the Docker images; 3.x compatible for local development) |
+| **Docker & Docker Compose** | Docker Engine 20.x or later; Compose v3.8 spec |
+| **Gemini API Key** | A valid `GEMINI_API_KEY` from Google AI Studio for Gemini LLM and embedding features |
+| **PostgreSQL + PostGIS** | Provided automatically via the `db` container (auto-seeded on first boot); PostGIS required for geometry columns |
+
+<Note>
+  **Offline Fallback Mode:** GeoMine runs without a live database or Gemini API key. When `RAG_BACKEND=in_memory`, the system loads pre-computed embeddings from `nwis-historical-intelligence/nwis_mock_embeddings_cache.json` and historical event records from `nwis_mock_historical_events.json`. Fallback vectors are generated deterministically for any document not found in the cache, so the full analysis pipeline remains functional in air-gapped or offline environments.
+</Note>

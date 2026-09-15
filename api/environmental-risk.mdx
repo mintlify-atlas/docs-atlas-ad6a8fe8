@@ -1,0 +1,119 @@
+---
+title: "POST /api/environmental_risk — Environmental and Infrastructure Risk"
+sidebarTitle: "POST /environmental_risk"
+description: "Assesses environmental and underground infrastructure risks (aquifers, gas pipelines) at the drilling location and current depth using the environmental risk engine."
+---
+
+`POST /api/environmental_risk` evaluates whether the current drill path is approaching or intersecting known underground environmental hazards — specifically aquifer zones and high-pressure gas pipelines. The engine in `environmental_engine.py` performs a simplified 3D proximity check, comparing the current drilling depth against the registered depth of each infrastructure item. When the depth difference falls within a critical threshold, the assessment escalates to `CRITICAL` and a descriptive warning is added to the response. This endpoint is designed to be called continuously as the bit advances deeper.
+
+## Request
+
+`POST /api/environmental_risk`
+
+<ParamField body="lat" type="float" required>
+  Rig latitude in decimal degrees. Passed to the environmental risk engine for future spatial (X/Y) proximity extensions.
+
+  **Example:** `27.35`
+</ParamField>
+
+<ParamField body="lon" type="float" required>
+  Rig longitude in decimal degrees.
+
+  **Example:** `95.32`
+</ParamField>
+
+<ParamField body="current_depth" type="float" required>
+  Current bit depth in metres. This is the primary value tested against known infrastructure depths.
+
+  **Example:** `1190.0`
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/environmental_risk \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lat": 27.35,
+    "lon": 95.32,
+    "current_depth": 1190.0
+  }'
+```
+
+## Infrastructure Data
+
+The current implementation uses the following static infrastructure records, defined directly in the `/api/environmental_risk` endpoint handler. These represent underground assets in the prototype drilling area:
+
+| Type | Depth (m) | Risk if within 50m |
+|------|-----------|--------------------|
+| `"Aquifer"` | 1200 | Groundwater contamination warning |
+| `"Gas Pipeline"` | 450 | High-pressure gas ignition hazard |
+
+The depth intersection threshold is **50 metres**. If `abs(current_depth - infra_depth) < 50`, the item triggers a CRITICAL risk flag and a descriptive warning string is added to the response.
+
+## Response
+
+<ResponseField name="environmental_risk_level" type="string">
+  Overall risk level based on proximity to all registered infrastructure items. Returns `"SAFE"` when no items are within the 50-metre threshold, or `"CRITICAL"` when one or more items are within threshold.
+</ResponseField>
+
+<ResponseField name="warnings" type="array">
+  List of warning strings, one per triggered infrastructure item. Empty when `environmental_risk_level` is `"SAFE"`.
+
+  - For **Aquifer** proximity: `"WARNING: Drill path intersects active Aquifer at {depth}m. High risk of groundwater contamination."`
+  - For **Gas Pipeline** proximity: `"FATAL: Drill trajectory approaching High-Pressure Gas Pipeline at {depth}m."`
+</ResponseField>
+
+### Example Response — CRITICAL (Aquifer proximity)
+
+Request sent with `current_depth: 1190.0` — only 10 metres from the aquifer at 1200m:
+
+```json
+{
+  "environmental_risk_level": "CRITICAL",
+  "warnings": [
+    "WARNING: Drill path intersects active Aquifer at 1200m. High risk of groundwater contamination."
+  ]
+}
+```
+
+### Example Response — CRITICAL (Gas Pipeline proximity)
+
+Request sent with `current_depth: 420.0` — 30 metres from the pipeline at 450m:
+
+```json
+{
+  "environmental_risk_level": "CRITICAL",
+  "warnings": [
+    "FATAL: Drill trajectory approaching High-Pressure Gas Pipeline at 450m."
+  ]
+}
+```
+
+### Example Response — SAFE
+
+Request sent with `current_depth: 800.0` — more than 50m from both registered assets:
+
+```json
+{
+  "environmental_risk_level": "SAFE",
+  "warnings": []
+}
+```
+
+### Example Response — Multiple hazards active
+
+Request sent with `current_depth: 1202.0` triggers both the aquifer (2m away) and (if pipeline were near):
+
+```json
+{
+  "environmental_risk_level": "CRITICAL",
+  "warnings": [
+    "WARNING: Drill path intersects active Aquifer at 1200m. High risk of groundwater contamination."
+  ]
+}
+```
+
+<Note>
+  The current implementation performs depth-only intersection checks (1D approximation). The `lat` and `lon` parameters are passed to the engine to support future 3D Haversine-based spatial proximity calculations — this will allow infrastructure items to carry their own geographic coordinates for accurate X/Y/Z intersection modelling. For production deployments, replace the static `infrastructure_data` list in `main.py` with a live query against the `underground_infrastructure` database table.
+</Note>

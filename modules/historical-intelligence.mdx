@@ -1,0 +1,264 @@
+---
+title: "NWIS Historical Drilling Intelligence Engine"
+sidebarTitle: "Historical Intelligence"
+description: "The analyze_well() function coordinates search, pattern analysis, and evidence generation over historical offset well events to surface relevant analog incidents."
+---
+
+The Historical Intelligence Engine transforms a raw pool of offset well drilling events into structured, ranked, and traceable intelligence that informs real-time risk decisions. It is the core analytical layer of the NWIS platform, sitting between the GIS spatial filter and the Gemini AI explanation layer. The engine is entirely deterministic — every result can be traced back to a specific field value in the historical database — making it auditable by drilling engineers without requiring knowledge of machine learning.
+
+## Entry Point: `analyze_well()`
+
+The single public entry point coordinates the full pipeline: search → analyze → evidence.
+
+```python
+from intelligence import analyze_well
+
+result = analyze_well(
+    events=db_events,
+    nearby_well_ids=["A-17", "C-04", "G-33"],
+    current_depth=2800.0,
+    formation="Formation X",
+    depth_tolerance=80.0
+)
+```
+
+<ParamField path="events" type="list" required>
+  The full loaded historical drilling events dataset — a list of event dicts, each containing at minimum `well_id`, `depth_m`, `formation`, and `event_type`.
+</ParamField>
+
+<ParamField path="nearby_well_ids" type="list" required>
+  List of offset well IDs pre-filtered by the GIS Haversine engine. Only events whose `well_id` appears in this list are considered.
+</ParamField>
+
+<ParamField path="current_depth" type="float" required>
+  Current measured drilling depth in metres. Used as the centre of the depth window search.
+</ParamField>
+
+<ParamField path="formation" type="str" required>
+  Target geological formation name (e.g. `"Formation X"`). Pass `"all"` to search across all formations.
+</ParamField>
+
+<ParamField path="event_type" type="str">
+  Optional case-insensitive filter for a specific event type (e.g. `"Stuck Pipe"`). Defaults to `None` (all event types).
+</ParamField>
+
+<ParamField path="depth_tolerance" type="float">
+  Depth window in metres (±) around `current_depth`. Defaults to `100`. Only events within `[current_depth - depth_tolerance, current_depth + depth_tolerance]` are matched.
+</ParamField>
+
+**Return shape:**
+
+```python
+{
+    "historical_events": [...],    # Filtered, ranked event dicts
+    "pattern_analysis": {...},     # Aggregated frequency metrics
+    "evidence": [...]              # Deterministic evidence records
+}
+```
+
+## Search Module
+
+**File:** `nwis-historical-intelligence/src/search.py`
+
+`search_historical_events()` is the first stage. It iterates over every event in the dataset and applies four conjunctive filters:
+
+<Steps>
+  <Step title="Well ID Filter">
+    `event["well_id"]` must appear in `nearby_well_ids`. Pass `None` for `nearby_well_ids` to skip this filter and search all wells.
+  </Step>
+  <Step title="Formation Filter">
+    `event["formation"]` must match `formation` (case-insensitive). Formation `"all"` bypasses this filter.
+  </Step>
+  <Step title="Depth Window Filter">
+    `abs(event["depth_m"] - current_depth) <= depth_tolerance`
+  </Step>
+  <Step title="Event Type Filter">
+    If `event_type` is provided, `event["event_type"]` must match it exactly (case-insensitive).
+  </Step>
+</Steps>
+
+Each matching event receives two computed fields before being returned:
+
+- **`depth_difference_m`** — `abs(event["depth_m"] - current_depth)`
+- **`relevance_score`** — `100 × (1 - depth_difference_m / depth_tolerance)` — a 0–100 score where 100 means the event occurred at exactly the current depth
+
+Results are sorted descending by `relevance_score`. Events at identical depths to the current position surface first.
+
+```python
+from search import search_historical_events
+
+events = search_historical_events(
+    events=db_events,
+    nearby_well_ids=["A-17", "G-33"],
+    current_depth=2800,
+    formation="Formation X",
+    depth_tolerance=80
+)
+# Returns list sorted by relevance_score descending
+# Each dict includes depth_difference_m and relevance_score
+```
+
+## Analyzer Module
+
+**File:** `nwis-historical-intelligence/src/analyzer.py`
+
+`analyze_historical_events()` consumes the filtered results from the Search module and returns a comprehensive frequency and statistics summary. This payload drives the Gemini AI summary and the dashboard pattern cards.
+
+```python
+from analyzer import analyze_historical_events
+
+pattern = analyze_historical_events(matching_events)
+```
+
+**Return fields:**
+
+<ResponseField name="total_events" type="int">
+  Total number of matching historical events found.
+</ResponseField>
+
+<ResponseField name="unique_wells" type="int">
+  Number of distinct well IDs across all matched events.
+</ResponseField>
+
+<ResponseField name="event_frequency" type="dict">
+  Count of each event type. Example: `{"Stuck Pipe": 6, "Mud Loss": 3, "Torque Spike": 2}`.
+</ResponseField>
+
+<ResponseField name="most_common_event" type="str">
+  The event type with the highest frequency. `None` if no events.
+</ResponseField>
+
+<ResponseField name="depth_range" type="dict">
+  `{"min_depth": float, "max_depth": float}` — depth range of matched events.
+</ResponseField>
+
+<ResponseField name="average_depth" type="float">
+  Mean depth (metres) of all matched events.
+</ResponseField>
+
+<ResponseField name="cause_frequency" type="dict">
+  Frequency count of every distinct `cause` string across matched events.
+</ResponseField>
+
+<ResponseField name="mitigation_frequency" type="dict">
+  Frequency count of every distinct `mitigation` string across matched events.
+</ResponseField>
+
+If `results` is empty, all numeric fields return `0` or `None`, and all dicts return `{}`.
+
+## Evidence Module
+
+**File:** `nwis-historical-intelligence/src/evidence.py`
+
+`generate_evidence()` is the **anti-hallucination layer**. It transforms the filtered search results into structured evidence records using only fields already present in each event dict — no inference, no LLM involvement.
+
+```python
+from evidence import generate_evidence
+
+evidence = generate_evidence(
+    results=matching_events,
+    current_depth=2800.0,
+    formation="Formation X"
+)
+```
+
+Each evidence record contains:
+
+| Field | Source |
+|-------|--------|
+| `well_id` | `event["well_id"]` |
+| `event_type` | `event["event_type"]` |
+| `event_depth_m` | `event["depth_m"]` |
+| `depth_difference_m` | computed or `event["depth_difference_m"]` |
+| `relevance_score` | `event["relevance_score"]` |
+| `reason` | deterministic string: same/different formation + depth offset |
+| `cause` | `event["cause"]` |
+| `mitigation` | `event["mitigation"]` |
+| `outcome` | `event["outcome"]` |
+| `source` | `event["report_id"]` |
+
+The `reason` field is generated deterministically from formation match and depth difference — for example: `"Same formation and historical event occurred 12.0 m from the current depth."` It will never fabricate a well name, depth, or event that is not present in the underlying record.
+
+<Note>
+`generate_evidence()` returns an empty list if no matching events are found — it never invents placeholder evidence. This keeps the NWIS evidence trail 100% traceable to the source database.
+</Note>
+
+## LLM Integration
+
+The `HistoricalAnswerGenerator` class wraps `GeminiProvider` (model: `gemini-2.0-flash-lite`) to produce engineer-focused natural language summaries of the `pattern_analysis` payload. It operates asynchronously with a hard 45-second timeout enforced in the API:
+
+```python
+explanation = await asyncio.wait_for(
+    generator.generate_answer_async(
+        question=f"Summarize the historical events for {formation} around depth {depth}m.",
+        historical_intelligence={"pattern_analysis": intel_result["pattern_analysis"]}
+    ),
+    timeout=45.0
+)
+```
+
+Only the `pattern_analysis` slice (not raw events or evidence) is sent to the LLM to minimise payload size and reduce latency. If the Gemini API times out, the UI displays a timeout warning rather than blocking the full response.
+
+## HistoricalQueryService
+
+`HistoricalQueryService` exposes a higher-level NLP interface used by the `/api/search_knowledge` endpoint. It accepts a free-text question, parses it with `LLMQueryParser` to extract `current_depth`, `formation`, and `event_type`, then orchestrates the full `analyze_well()` pipeline and optional RAG retrieval.
+
+```python
+query_service = HistoricalQueryService(
+    provider=GeminiProvider(),
+    events=db_events,
+    rag_service=rag_service,
+)
+
+result = query_service.answer_query(
+    question="What stuck pipe incidents occurred in Formation X near 2800m?",
+    nearby_well_ids=["A-17", "C-04", "G-33"],
+    top_k=5,
+    generate_answer=True,
+)
+```
+
+<ParamField path="question" type="str" required>
+  Natural language question about historical drilling incidents.
+</ParamField>
+
+<ParamField path="nearby_well_ids" type="list[str]" required>
+  GIS-prefiltered offset well IDs to restrict the search scope.
+</ParamField>
+
+<ParamField path="top_k" type="int">
+  Maximum number of RAG evidence results to return. Defaults to `5`.
+</ParamField>
+
+<ParamField path="generate_answer" type="bool">
+  If `True`, calls `HistoricalAnswerGenerator` and appends an `"answer"` key to the response. Defaults to `False`.
+</ParamField>
+
+The method raises `ValueError` if the parser cannot extract `current_depth` or `formation` from the question.
+
+## Direct Usage Example
+
+```python
+from intelligence import analyze_well
+from data_loader import load_historical_events
+
+# Load events from PostgreSQL (or mock JSON fallback)
+events = load_historical_events()
+
+# Run full intelligence pipeline
+result = analyze_well(
+    events=events,
+    nearby_well_ids=["A-17", "C-04", "G-33", "N-40"],
+    current_depth=2798.0,
+    formation="Formation X",
+    depth_tolerance=100.0
+)
+
+# Access structured outputs
+print(result["pattern_analysis"]["most_common_event"])  # "Stuck Pipe"
+print(result["pattern_analysis"]["total_events"])       # 8
+print(result["pattern_analysis"]["unique_wells"])       # 4
+
+for ev in result["evidence"]:
+    print(ev["well_id"], ev["event_type"], ev["reason"])
+```

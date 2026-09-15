@@ -1,47 +1,191 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with GeoMine in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Deploy the GeoMine NWIS stack with Docker Compose and run your first drilling risk analysis against the pre-seeded well repository."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+GeoMine ships as a self-contained Docker Compose stack. A single `docker compose up --build` command provisions a PostGIS database pre-seeded with historical drilling events, starts the FastAPI backend hub, and launches the Streamlit dashboard — no manual database setup or dependency wrangling required. The steps below walk you from a fresh clone to a completed risk analysis in under five minutes.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the Repository">
+    Clone the GeoMine repository and navigate into the project root.
 
     ```bash
-    npm install your-package
+    git clone https://github.com/jisjthomass/Geomine.git
+    cd Geomine
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
+  <Step title="Configure Environment">
+    Create a `.env` file in the project root. At minimum, set your Gemini API key and choose a RAG backend.
+
+    ```ini
+    GEMINI_API_KEY=your_key_here
+    RAG_BACKEND=in_memory
     ```
+
+    **`RAG_BACKEND` options:**
+
+    | Value | Behaviour |
+    |---|---|
+    | `in_memory` | Loads pre-computed embeddings from `nwis_mock_embeddings_cache.json`. No database write required. Ideal for offline development and demos. |
+    | `pgvector` | Uses the `PgVectorRetriever` backed by the PostgreSQL `rag_embeddings` table. Requires the `db` container to be healthy and the `pgvector` extension installed. Recommended for production. |
+
+    The backend also reads the following database credentials from the environment (defaults are set in `docker-compose.yml`):
+
+    ```ini
+    DB_HOST=db
+    DB_USER=postgres
+    DB_PASSWORD=postgres
+    DB_NAME=nwis_wells_db
+    DB_PORT=5432
+    ```
+
+    These are already configured inside the Compose file so you do not need to set them manually unless you are overriding the defaults.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Start the Stack">
+    Build images and start all three services in detached mode.
 
     ```bash
-    your-cli start
+    docker compose up --build -d
     ```
+
+    Docker Compose brings up three containers in dependency order:
+
+    | Container | Service | Port | Role |
+    |---|---|---|---|
+    | `geomine_db` | `db` | `5432` | PostgreSQL 15 + PostGIS. Auto-seeded on first boot from four SQL init scripts: `historical_drilling_events.sql`, `02_round2_upgrades.sql`, `rag/03_rag_embeddings.sql`, and `04_ocr_schema_upgrades.sql`. |
+    | `geomine_backend` | `backend` | `8000` | FastAPI app served by Uvicorn with `--reload`. Loads the scikit-learn model from `ML/stuck_pipe_model.pkl` at startup. |
+    | `geomine_dashboard` | `dashboard` | `8501` | Streamlit dashboard. Connects to the backend via `BACKEND_URL=http://backend:8000`. |
+
+    The database seed runs automatically — no `psql` commands are needed.
+  </Step>
+
+  <Step title="Verify the Backend">
+    Confirm the FastAPI backend is online before opening the dashboard.
+
+    ```bash
+    curl http://localhost:8000/
+    ```
+
+    Expected response:
+
+    ```json
+    {"status": "NWIS Backend is ONLINE and ready."}
+    ```
+
+    If the backend is still starting up, wait a few seconds and retry. You can also inspect container logs with `docker compose logs backend`.
+  </Step>
+
+  <Step title="Open the Dashboard">
+    Navigate to [http://localhost:8501](http://localhost:8501) in your browser.
+
+    The Streamlit dashboard sidebar presents a **Drilling Parameters Form** with the following controls:
+
+    | Control | Type | Description |
+    |---|---|---|
+    | **Target Formation Zone** | Selectbox | Choose from `Kopili Shale`, `Girujan Clay`, `Barail Coal-Shale`, `Lakadong-Therria`, or `All`. |
+    | **Search Radius (km)** | Slider | Radius used by the Haversine GIS filter to identify offset wells. Default: `5.0 km`. |
+    | **Depth Window (m)** | Slider | Corridor above and below current bit depth for matching historical events. Default: `80.0 m`. |
+    | **Current Depth (m)** | Number input | Current measured depth of the drill bit. |
+    | **ROP (m/hr)** | Number input | Rate of Penetration. Safe envelope: 5–25 m/hr. |
+    | **Torque (kN·m)** | Number input | Rotary torque. Safe envelope: 1,000–5,000 kN·m. |
+    | **RPM** | Number input | Drill string rotations per minute. Safe envelope: 60–150 RPM. |
+    | **WOB (klbs)** | Number input | Weight on Bit. Safe envelope: 4–20 klbs. |
+    | **Generate AI Risk Summary** | Checkbox | Enables the Gemini AI narrative (adds ~5 s latency). |
+
+    Click **Run Drilling Risk Analysis** to submit.
+  </Step>
+
+  <Step title="Run Your First Analysis">
+    You can call the API directly with `curl`. The following example uses coordinates from the default active well in the dashboard (Duliajan Sector 4, Assam):
+
+    ```bash
+    curl -X POST http://localhost:8000/api/analyze_risk \
+      -H "Content-Type: application/json" \
+      -d '{
+        "location_area": "Duliajan Sector 4",
+        "lat": 27.35,
+        "lon": 95.32,
+        "target_formation": "Kopili Shale",
+        "depth": 2780,
+        "rop": 15.2,
+        "rpm": 120.5,
+        "torque": 4500,
+        "wob": 10.5,
+        "search_radius_km": 5.0,
+        "depth_window": 80.0,
+        "enable_ai": false
+      }'
+    ```
+
+    A successful response follows the `MasterResponse` schema:
+
+    ```json
+    {
+      "status": "success",
+      "analysis_timestamp": "2025-01-15T10:23:45.123456Z",
+      "ml_prediction": {
+        "risk_score": 18.4,
+        "risk_level": "SAFE",
+        "predicted_event": "Safe Operations"
+      },
+      "historical_context": {
+        "nearby_wells_analyzed": 6,
+        "historical_matches_found": 6,
+        "evidence_string": "...",
+        "recommended_action": "Review the Gemini AI explanation and adapt drilling parameters.",
+        "offset_wells_map_data": [
+          {
+            "well_id": "W-101",
+            "name": "W-101",
+            "lat": 27.352,
+            "lon": 95.318,
+            "distance_km": 0.41,
+            "similarity": 0.87,
+            "event_type": "Stuck Pipe",
+            "event_md": 2790,
+            "formation_at_2780": "Kopili Shale",
+            "event_note": "Differential sticking at formation boundary."
+          }
+        ],
+        "stuck_pipe_count": 1,
+        "mud_loss_count": 0,
+        "torque_spike_count": 0
+      }
+    }
+    ```
+
+    The `ml_prediction.risk_score` is the **composite** score after adding analog-well penalties: +15 per nearby stuck-pipe event, +10 per mud-loss event, and +8 per torque-spike event.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Running Without Docker
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+For local development or debugging, you can run the backend and dashboard directly with Python.
+
+```bash
+# 1. Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# 2. Install all dependencies
+pip install -r requirements.txt
+
+# 3. Start the FastAPI backend
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# 4. In a second terminal, start the Streamlit dashboard
+streamlit run nwis_dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+Ensure that a PostgreSQL + PostGIS instance is reachable and that the `DB_HOST` environment variable points to it, or set `RAG_BACKEND=in_memory` to skip the database dependency entirely.
+
+<Tip>
+  Enable the **Generate AI Risk Summary** checkbox in the sidebar (or set `"enable_ai": true` in your API payload) to receive a Gemini-powered narrative that cites specific offset wells by name, describes the formation hazards encountered, and suggests concrete mitigation steps. The summary is generated asynchronously with a 45-second timeout and appears as the `evidence_string` field in the response. For maximum analysis speed during high-frequency polling, leave `enable_ai` set to `false` and call `/api/generate_ai_summary` separately for lazy-loaded AI content.
 </Tip>
+
+<Warning>
+  AI features — including the Gemini narrative summary and semantic embeddings — require a valid `GEMINI_API_KEY` set in your `.env` file or shell environment. Without a key, `GeminiProvider` will raise an authentication error and the `evidence_string` field will contain a fallback message. The ML risk score, GIS spatial filter, and historical pattern analysis **continue to function normally** without the API key; only the LLM-generated explanation is unavailable.
+</Warning>

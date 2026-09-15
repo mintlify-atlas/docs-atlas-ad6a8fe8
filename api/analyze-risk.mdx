@@ -1,0 +1,242 @@
+---
+title: "POST /api/analyze_risk — Core Drilling Risk Orchestrator"
+sidebarTitle: "POST /analyze_risk"
+description: "Analyzes live drilling telemetry through ML risk scoring, GIS spatial filtering, and RAG historical intelligence to return a composite risk assessment and offset well map data."
+---
+
+`POST /api/analyze_risk` is the primary orchestration endpoint of the NWIS Backend Hub. A single call triggers three sequential engines: the **ML Risk Engine** (a trained stuck-pipe classifier returning a 0–99 probability score), the **GIS Spatial Filter** (Haversine-based radius query over the PostgreSQL events database), and the **Gemini Historical Intelligence Engine** (RAG pattern analysis with optional LLM narrative generation). The composite result includes a final risk level, event prediction, evidence string, and a sorted list of offset well map markers ready for the front-end dashboard.
+
+## Request
+
+<ParamField body="location_area" type="string" required>
+  Human-readable name for the current drilling area. Used for logging and the AI narrative prompt.
+
+  **Example:** `"Duliajan Sector 4"`
+</ParamField>
+
+<ParamField body="lat" type="float" required>
+  Rig latitude in decimal degrees. Used as the GIS search origin for offset well filtering.
+
+  **Example:** `27.35`
+</ParamField>
+
+<ParamField body="lon" type="float" required>
+  Rig longitude in decimal degrees. Used as the GIS search origin for offset well filtering.
+
+  **Example:** `95.32`
+</ParamField>
+
+<ParamField body="target_formation" type="string" required>
+  Name of the geological formation currently being drilled. Passed to the Gemini summary prompt.
+
+  **Example:** `"Formation X"`
+</ParamField>
+
+<ParamField body="depth" type="float" required>
+  Current bit depth in meters. Must be greater than 0. Used as the center of the historical depth corridor search.
+
+  **Constraint:** `gt=0`
+</ParamField>
+
+<ParamField body="rop" type="float" required>
+  Rate of Penetration in metres per hour. Values below 5.0 or above 35.0 trigger elevated risk scoring.
+
+  **Constraint:** `ge=0`
+</ParamField>
+
+<ParamField body="rpm" type="float" required>
+  Rotary Table Speed in revolutions per minute. Values below 60.0 contribute to sticking risk scoring.
+
+  **Constraint:** `ge=0`
+</ParamField>
+
+<ParamField body="torque" type="float" required>
+  Surface Torque in ft-lbs. Values above 5000 trigger HIGH risk; above 6500 trigger CRITICAL over-torque classification.
+
+  **Constraint:** `ge=0`
+</ParamField>
+
+<ParamField body="wob" type="float" required>
+  Weight on Bit in klbs. Values above 28.0 trigger CRITICAL string buckling classification.
+
+  **Constraint:** `ge=0`
+</ParamField>
+
+<ParamField body="search_radius_km" type="float" default="5.0">
+  Radius in kilometres around the rig coordinates to include offset wells from the historical database.
+
+  **Constraint:** `gt=0`
+</ParamField>
+
+<ParamField body="depth_window" type="float" default="80.0">
+  Depth corridor in metres (±) around `depth` to match historical events. A value of `80.0` means events between `depth - 80` and `depth + 80` are considered analogous.
+
+  **Constraint:** `gt=0`
+</ParamField>
+
+<ParamField body="enable_ai" type="boolean" default="true">
+  When `true`, the endpoint calls the Gemini LLM to generate a narrative `evidence_string`. Set to `false` to skip Gemini and receive a static placeholder, reducing response time by approximately 5×.
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/analyze_risk \
+  -H "Content-Type: application/json" \
+  -d '{
+    "location_area": "Duliajan Sector 4",
+    "lat": 27.35,
+    "lon": 95.32,
+    "target_formation": "Formation X",
+    "depth": 2780,
+    "rop": 12.5,
+    "rpm": 110,
+    "torque": 3200,
+    "wob": 14.0,
+    "search_radius_km": 5.0,
+    "depth_window": 80.0,
+    "enable_ai": true
+  }'
+```
+
+## Response
+
+The endpoint is typed against the `MasterResponse` Pydantic model. All fields are always present in a successful response.
+
+<ResponseField name="status" type="string">
+  Always `"success"` on a valid response.
+</ResponseField>
+
+<ResponseField name="analysis_timestamp" type="string">
+  UTC timestamp of when the analysis was performed, formatted as ISO 8601.
+
+  **Example:** `"2024-11-14T08:22:05.123456Z"`
+</ResponseField>
+
+<ResponseField name="ml_prediction" type="object">
+  Output of the ML Risk Engine, merged with the analog spatial risk from nearby offset wells.
+
+  <Expandable title="ml_prediction fields">
+    <ResponseField name="risk_score" type="float">
+      Composite risk probability from 0.0 to 99.0. Calculated from the ML model output plus incremental penalties for nearby stuck-pipe events (×15 per event), mud-loss events (×10 per event), and torque-spike events (×8 per event). Capped at `99.0`.
+    </ResponseField>
+    <ResponseField name="risk_level" type="string">
+      Categorical risk band derived from `risk_score`. One of: `"SAFE"`, `"MEDIUM"`, `"HIGH"`, or `"CRITICAL"`.
+    </ResponseField>
+    <ResponseField name="predicted_event" type="string">
+      Human-readable prediction label, e.g. `"Stuck Pipe Warning"`, `"Elevated Drag"`, `"Stuck Pipe & Mud Loss (Analog Risk)"`. Appended with analog risk tags when offset wells surface correlated hazards.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="historical_context" type="object">
+  Output of the GIS spatial filter and Gemini Historical Intelligence Engine.
+
+  <Expandable title="historical_context fields">
+    <ResponseField name="nearby_wells_analyzed" type="integer">
+      Total number of historical events found in the spatial + depth window.
+    </ResponseField>
+    <ResponseField name="historical_matches_found" type="integer">
+      Same value as `nearby_wells_analyzed`. Exposed separately for UI card rendering.
+    </ResponseField>
+    <ResponseField name="evidence_string" type="string">
+      HTML-formatted narrative generated by Gemini (newlines replaced with `<br>`), or a static placeholder when `enable_ai` is `false`. Rendered directly in the dashboard intelligence panel.
+    </ResponseField>
+    <ResponseField name="recommended_action" type="string">
+      Static advisory string: `"Review the Gemini AI explanation and adapt drilling parameters."`
+    </ResponseField>
+    <ResponseField name="offset_wells_map_data" type="array">
+      Array of offset well objects for the front-end map, sorted so CRITICAL hazards (Stuck Pipe → Mud Loss → Torque Spike) appear first.
+    </ResponseField>
+    <ResponseField name="stuck_pipe_count" type="integer">
+      Number of offset wells in the current radius that record a Stuck Pipe event.
+    </ResponseField>
+    <ResponseField name="mud_loss_count" type="integer">
+      Number of offset wells in the current radius that record a Mud Loss event.
+    </ResponseField>
+    <ResponseField name="torque_spike_count" type="integer">
+      Number of offset wells in the current radius that record a Torque Spike event.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### offset_wells_map_data Item Schema
+
+Each element in the `offset_wells_map_data` array has the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `well_id` | string | Unique identifier of the offset well |
+| `name` | string | Display name (mirrors `well_id`) |
+| `lat` | float | Offset well latitude |
+| `lon` | float | Offset well longitude |
+| `distance_km` | float | Haversine distance from rig coordinates to this well |
+| `similarity` | float | RAG relevance score (0.0–1.0) from the embedding retrieval engine |
+| `event_type` | string | Normalised event label: `"Stuck Pipe"`, `"Mud Loss"`, `"Torque Spike"`, or `"None"` |
+| `event_md` | float | Depth in metres at which the event occurred in this well |
+| `formation_at_2780` | string | Formation name at the matched depth |
+| `event_note` | string | Cause description, summary text, or `"No detailed remarks logged."` |
+
+### Example Response
+
+```json
+{
+  "status": "success",
+  "analysis_timestamp": "2024-11-14T08:22:05.123456Z",
+  "ml_prediction": {
+    "risk_score": 67.4,
+    "risk_level": "HIGH",
+    "predicted_event": "Elevated Drag + Stuck Pipe (Analog Risk)"
+  },
+  "historical_context": {
+    "nearby_wells_analyzed": 4,
+    "historical_matches_found": 4,
+    "evidence_string": "Two analog wells within 3 km experienced Stuck Pipe events at 2740–2820 m in Formation X. In well OIL-4412, a torque spike of 6200 ft-lbs preceded a 48-hour fishing operation. Recommend reducing WOB and circulating with HiVis sweep before drilling ahead.<br>",
+    "recommended_action": "Review the Gemini AI explanation and adapt drilling parameters.",
+    "stuck_pipe_count": 2,
+    "mud_loss_count": 1,
+    "torque_spike_count": 0,
+    "offset_wells_map_data": [
+      {
+        "well_id": "OIL-4412",
+        "name": "OIL-4412",
+        "lat": 27.352,
+        "lon": 95.318,
+        "distance_km": 0.87,
+        "similarity": 0.91,
+        "event_type": "Stuck Pipe",
+        "event_md": 2745.0,
+        "formation_at_2780": "Formation X",
+        "event_note": "High WOB combined with poor hole cleaning caused differential sticking."
+      },
+      {
+        "well_id": "OIL-3870",
+        "name": "OIL-3870",
+        "lat": 27.361,
+        "lon": 95.327,
+        "distance_km": 1.43,
+        "similarity": 0.78,
+        "event_type": "Mud Loss",
+        "event_md": 2810.0,
+        "formation_at_2780": "Formation X",
+        "event_note": "Lost circulation at natural fracture zone. Pumped LCM pill to cure."
+      }
+    ]
+  }
+}
+```
+
+## Risk Level Thresholds
+
+The final `risk_score` (after ML output + analog well penalties) is mapped to a `risk_level` band:
+
+| risk_score range | risk_level | Recommended Response |
+|------------------|------------|----------------------|
+| > 75 | `CRITICAL` | Immediate corrective action required |
+| > 50 | `HIGH` | Alert driller, prepare contingency |
+| > 30 | `MEDIUM` | Monitor closely, adjust parameters |
+| ≤ 30 | `SAFE` | Continue standard operations |
+
+<Note>
+  Set `enable_ai: false` for approximately **5× faster responses**. This bypasses the Gemini LLM call entirely and returns a static placeholder in `evidence_string`. All ML scoring, GIS filtering, and offset well map data are still computed and returned. This mode is recommended for high-frequency polling or automated monitoring dashboards where narrative text is not required on every tick.
+</Note>

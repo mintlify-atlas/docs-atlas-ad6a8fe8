@@ -1,0 +1,112 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "GeoMine — NWIS Drilling Risk & Spatial Intelligence",
+  "projectDescription": "GeoMine is an AI-powered drilling risk platform (NWIS) that combines real-time telemetry analysis, ML-based stuck-pipe prediction, RAG-based historical intelligence, OCR document ingestion, and GIS spatial filtering to help engineers identify and mitigate downhole hazards during oil and gas well drilling.",
+  "theme": "aspen",
+  "primaryColor": "#38bdf8",
+  "lightColor": "#e0f2fe",
+  "darkColor": "#0f172a",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Core Modules",
+            "pages": [
+              "modules/ml-risk-engine",
+              "modules/historical-intelligence",
+              "modules/gis-spatial-engine",
+              "modules/rag-retrieval",
+              "modules/ocr-pipeline",
+              "modules/npt-analyzer",
+              "modules/physics-engine"
+            ]
+          },
+          {
+            "group": "Dashboard",
+            "pages": [
+              "dashboard/overview",
+              "dashboard/telemetry-controls",
+              "dashboard/gis-spatial-command",
+              "dashboard/knowledge-repository"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker-setup",
+              "deployment/environment-variables",
+              "deployment/database-schema"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "REST Endpoints",
+            "pages": [
+              "api/overview",
+              "api/analyze-risk",
+              "api/search-knowledge",
+              "api/ingest-report",
+              "api/upload-report",
+              "api/npt-analysis",
+              "api/environmental-risk",
+              "api/mitigation-queue"
+            ]
+          },
+          {
+            "group": "WebSocket",
+            "pages": [
+              "api/websocket-telemetry"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "ML-based stuck pipe risk scoring using scikit-learn with 5 telemetry features (depth, ROP, RPM, torque, WOB)",
+    "GIS spatial filtering using Haversine distance to identify nearby offset wells within a configurable radius",
+    "RAG-based historical intelligence with in-memory and pgvector backends, powered by Gemini embeddings",
+    "OCR document ingestion pipeline (PDF/DOCX/XLSX) using PyMuPDF, Tesseract, and Ollama/Gemini LLM extraction",
+    "Real-time WebSocket telemetry stream with stick-slip (MSE) detection via physics engine",
+    "Human-in-the-loop (HITL) mitigation queue for engineer review and approval of AI-generated mitigation plans",
+    "NPT (Non-Productive Time) financial analytics engine comparing current vs. historical offset well costs",
+    "Streamlit dashboard with live rig simulator, GIS map, analog well matching, and natural language knowledge search",
+    "FastAPI backend with Pydantic-validated input/output schemas and async Gemini AI generation",
+    "PostgreSQL + PostGIS backend with auto-seeding via Docker Compose"
+  ],
+  "publicApiSurface": [
+    "POST /api/analyze_risk — core orchestrator: ML risk + historical context + GIS spatial filter",
+    "POST /api/generate_ai_summary — async Gemini AI explanation generation",
+    "POST /api/search_knowledge — RAG-powered natural language drilling knowledge search",
+    "POST /api/ingest_report — structured JSON text ingestion into historical events DB",
+    "POST /api/upload_report — enterprise OCR file upload (PDF/DOCX/XLSX/image)",
+    "PATCH /api/ocr_correction — human correction feedback loop for OCR extractions",
+    "POST /api/analyze_npt — NPT financial analytics vs historical offset wells",
+    "POST /api/environmental_risk — environmental and underground infrastructure risk assessment",
+    "POST /api/mitigation/queue — queue an AI-generated mitigation plan for HITL review",
+    "GET /api/mitigation/pending — list pending engineer review items",
+    "POST /api/mitigation/approve/{queue_id} — approve a queued mitigation plan",
+    "WebSocket /ws/telemetry/{well_id} — real-time telemetry stream with physics analysis",
+    "GET / — health check",
+    "analyze_well(events, nearby_well_ids, current_depth, formation, depth_tolerance) — Historical Intelligence Engine entry point",
+    "RAGRetrievalService(events, provider, backend, auto_prepare) — RAG retrieval with in_memory or pgvector backend",
+    "calculate_mse_and_stick_slip(telemetry_window) — Physics engine: stick-slip and MSE detection",
+    "calculate_npt_insights(current_npt_minutes, comparable_events) — NPT financial analysis",
+    "GeminiProvider — LLM provider with sync/async .generate() and .generate_async()",
+    "HistoricalQueryService.answer_query(question, nearby_well_ids, top_k, generate_answer) — NLP query to historical intelligence"
+  ]
+}

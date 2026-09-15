@@ -1,0 +1,128 @@
+---
+title: "POST /api/analyze_npt — NPT Financial Cost Analysis"
+sidebarTitle: "POST /analyze_npt"
+description: "Compares current well Non-Productive Time against GIS-filtered historical offset wells to calculate financial impact at ₹20 lakh/day and potential savings."
+---
+
+`POST /api/analyze_npt` calculates the financial cost of Non-Productive Time (NPT) on the current well and benchmarks it against comparable historical events in the same geographical area. The endpoint uses the same Haversine GIS spatial filter as `/api/analyze_risk` to scope the offset well comparison pool, then runs the `calculate_npt_insights()` function from `npt_analyzer.py` to produce a cost breakdown and potential savings estimate. All monetary values are denominated in Indian Rupees (₹).
+
+## Request
+
+`POST /api/analyze_npt`
+
+<ParamField body="current_npt_minutes" type="integer" required>
+  Duration of Non-Productive Time on the current well, in minutes. This value is converted to hours internally before cost calculations are applied.
+
+  **Example:** `360` (= 6 hours)
+</ParamField>
+
+<ParamField body="lat" type="float" required>
+  Rig latitude in decimal degrees. Used as the spatial anchor for filtering comparable historical offset wells.
+
+  **Example:** `27.35`
+</ParamField>
+
+<ParamField body="lon" type="float" required>
+  Rig longitude in decimal degrees.
+
+  **Example:** `95.32`
+</ParamField>
+
+<ParamField body="search_radius_km" type="float" default="5.0">
+  Radius in kilometres within which historical events are considered comparable. Uses the Haversine formula against the `latitude` and `longitude` columns of each event in `historical_drilling_events`.
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8000/api/analyze_npt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "current_npt_minutes": 360,
+    "lat": 27.35,
+    "lon": 95.32,
+    "search_radius_km": 5.0
+  }'
+```
+
+## Response
+
+<ResponseField name="status" type="string">
+  `"success"` on a valid calculation, or `"error"` with a `message` field if the engine fails.
+</ResponseField>
+
+<ResponseField name="data" type="object">
+  The NPT insights object returned by `calculate_npt_insights()`.
+
+  <Expandable title="data fields">
+    <ResponseField name="current_npt_hours" type="float">
+      Current NPT converted from minutes to hours. Rounded to 2 decimal places.
+
+      **Example:** `6.0`
+    </ResponseField>
+    <ResponseField name="current_npt_cost" type="float">
+      Financial cost of the current NPT at the standard drilling day rate. Rounded to 2 decimal places.
+
+      **Example:** `500000.0` (₹5,00,000 for 6 hours)
+    </ResponseField>
+    <ResponseField name="historical_avg_npt_hours" type="float">
+      Average NPT hours across all comparable historical events (those with `npt_duration_minutes > 0`) within the search radius. `0.0` if no comparable data is available.
+    </ResponseField>
+    <ResponseField name="potential_reduction_hours" type="float">
+      Difference between `current_npt_hours` and `historical_avg_npt_hours`, floored at `0.0`. Represents the hours by which NPT could have been reduced had the well matched historical best-case performance.
+    </ResponseField>
+    <ResponseField name="potential_savings" type="float">
+      Monetary value of `potential_reduction_hours` at the standard hourly rate. `0.0` if current NPT is already at or below the historical average.
+    </ResponseField>
+    <ResponseField name="message" type="string">
+      Human-readable summary. Either `"NPT is {X} hours above historical average."` or `"NPT is within or below historical averages."` or `"No comparable historical NPT data available for offset wells."`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Rate Assumptions
+
+The NPT cost engine uses the following fixed rate constants defined in `npt_analyzer.py`:
+
+| Constant | Value | Derived from |
+|----------|-------|-------------|
+| `DRILLING_DAY_RATE` | ₹20,00,000 / day | Standard ONGC prototype assumption |
+| `HOURLY_RATE` | ₹83,333.33 / hour | `DRILLING_DAY_RATE ÷ 24` |
+
+All `_cost` and `potential_savings` values in the response are in Indian Rupees (₹).
+
+### Example Response
+
+```json
+{
+  "status": "success",
+  "data": {
+    "current_npt_hours": 6.0,
+    "current_npt_cost": 500000.0,
+    "historical_avg_npt_hours": 3.75,
+    "potential_reduction_hours": 2.25,
+    "potential_savings": 187500.0,
+    "message": "NPT is 2.25 hours above historical average."
+  }
+}
+```
+
+### Response when no historical data is available
+
+```json
+{
+  "status": "success",
+  "data": {
+    "current_npt_hours": 6.0,
+    "current_npt_cost": 500000.0,
+    "historical_avg_npt_hours": 0.0,
+    "potential_reduction_hours": 0.0,
+    "potential_savings": 0.0,
+    "message": "No comparable historical NPT data available for offset wells."
+  }
+}
+```
+
+<Note>
+  Historical NPT comparison requires that events in the database have a populated `npt_duration_minutes` column. Events with `npt_duration_minutes = 0` or `null` are excluded from the average calculation. Increase `search_radius_km` if no comparable data is returned for a narrow spatial window.
+</Note>

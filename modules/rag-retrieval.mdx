@@ -1,0 +1,238 @@
+---
+title: "RAG Historical Event Retrieval with Gemini Embeddings"
+sidebarTitle: "RAG Retrieval"
+description: "GeoMine's RAGRetrievalService supports in-memory and pgvector backends using Gemini text-embedding-004 to retrieve semantically relevant historical drilling events."
+---
+
+Keyword-based search misses critical analog incidents where the same underlying cause is described with different terminology across different reports. GeoMine's Retrieval-Augmented Generation (RAG) layer closes this gap by converting historical drilling events into dense vector embeddings and finding the most semantically similar incidents to the operator's free-text query — regardless of exact phrasing. The retrieved evidence is then passed to `HistoricalAnswerGenerator` to produce grounded, hallucination-resistant answers that cite only real records from the database.
+
+## RAGRetrievalService
+
+`RAGRetrievalService` is the central coordinator. It abstracts over two backends (`in_memory` and `pgvector`) and exposes a single `.retrieve()` method:
+
+```python
+from rag.retrieval_service import RAGRetrievalService
+from rag.embeddings import GeminiEmbeddingProvider
+
+provider = GeminiEmbeddingProvider()
+
+# In-memory mode
+service = RAGRetrievalService(
+    events=historical_events,
+    provider=provider,
+    backend="in_memory",
+    auto_prepare=True,
+)
+
+# pgvector mode
+service = RAGRetrievalService(
+    provider=provider,
+    backend="pgvector",
+)
+```
+
+<ParamField path="events" type="list[dict]">
+  Historical drilling events to embed and index. Required for `in_memory` backend. For `pgvector`, events are ingested separately via `ingest_to_db()`.
+</ParamField>
+
+<ParamField path="provider" type="EmbeddingProvider">
+  An `EmbeddingProvider` instance (typically `GeminiEmbeddingProvider`). Required for embedding uncached documents.
+</ParamField>
+
+<ParamField path="backend" type="str">
+  Retrieval backend: `"in_memory"` (default) or `"pgvector"`. Controlled by the `RAG_BACKEND` environment variable in production.
+</ParamField>
+
+<ParamField path="auto_prepare" type="bool">
+  If `True`, calls `prepare()` immediately on construction: builds document dicts, generates embeddings, and initialises `HybridRetriever`. Defaults to `False`.
+</ParamField>
+
+<ParamField path="retriever" type="BaseRetriever">
+  Optional pre-instantiated custom retriever. When supplied, `_is_prepared` is set to `True` immediately.
+</ParamField>
+
+<ParamField path="db_client" type="PgVectorDatabaseClient">
+  Optional database client for the `pgvector` backend.
+</ParamField>
+
+The active backend is selected at startup via the `RAG_BACKEND` environment variable:
+
+```python
+backend = os.getenv("RAG_BACKEND", "in_memory").strip().lower()
+```
+
+## Embedding Provider
+
+`GeminiEmbeddingProvider` wraps Google's Gemini embedding API using the `google-genai` SDK. The default model resolves to `gemini-embedding-001` unless overridden by `GEMINI_EMBEDDING_MODEL`:
+
+```python
+class GeminiEmbeddingProvider(EmbeddingProvider):
+    DEFAULT_MODEL = "gemini-embedding-001"
+
+    def embed_text(self, text: str) -> list[float]:
+        # Returns a list[float] embedding vector
+        # Cache-backed: hits local dict before calling API
+        ...
+```
+
+Vectors produced by the Gemini embedding API are **3072-dimensional** (as observed in `nwis_mock_embeddings_cache.json`). The provider maintains an in-memory `_cache` dict populated from the on-disk cache file at construction time.
+
+**Rate-limit resilience:** If the API returns HTTP 429 (`RESOURCE_EXHAUSTED`), the provider:
+1. Retries once after a dynamic back-off (up to 30 seconds).
+2. On final failure, falls back to a vocabulary-averaged vector using words shared with cached documents.
+3. If no cached vocabulary matches, generates a deterministic hash-based unit vector so the pipeline remains functional offline.
+
+## In-Memory Backend
+
+When `backend="in_memory"`, the startup sequence in `main.py` loads embeddings from the pre-computed cache file `nwis-historical-intelligence/nwis_mock_embeddings_cache.json`:
+
+```python
+cache_file = "nwis-historical-intelligence/nwis_mock_embeddings_cache.json"
+
+if os.path.exists(cache_file):
+    with open(cache_file) as f:
+        cache = json.load(f)
+
+    docs = events_to_documents(events)
+    embedded_docs = []
+
+    for doc in docs:
+        if doc["text"] in cache:
+            d = dict(doc)
+            d["embedding"] = cache[doc["text"]]  # Load cached vector
+            embedded_docs.append(d)
+        else:
+            uncached_docs.append(doc)  # Queue for live API embedding
+```
+
+For uncached documents, the provider attempts live embedding. If that fails (e.g. offline environment), a deterministic hash-based fallback vector is generated:
+
+```python
+seed = sum(ord(c) for c in udoc["text"])
+v = [float((seed + j * 17) % 100 + 1) for j in range(sample_dim)]
+norm = math.sqrt(sum(x * x for x in v)) or 1.0
+d["embedding"] = [x / norm for x in v]
+```
+
+This ensures the in-memory index is always populated and retrievable even without network access.
+
+Once all documents are embedded, `prepare()` builds an `InMemorySemanticIndex` and wraps it in a `HybridRetriever`:
+
+```python
+self._index = InMemorySemanticIndex()
+self._index.add_documents(self._embedded_documents)
+self._retriever = HybridRetriever(documents=self._embedded_documents, index=self._index)
+```
+
+## pgvector Backend
+
+When `backend="pgvector"`, `RAGRetrievalService` delegates to `PgVectorRetriever` backed by `PgVectorDatabaseClient`. Vectors are stored in the `historical_event_embeddings` table in PostgreSQL with the `pgvector` extension enabled.
+
+```python
+self._retriever = PgVectorRetriever(db_client=self.db_client)
+```
+
+Semantic search uses pgvector's cosine distance operator (`<=>`):
+
+```sql
+SELECT event_id, content, well_id, depth_m, formation, event_type,
+       (embedding <=> %s::vector) AS distance
+FROM historical_event_embeddings
+WHERE formation = %s
+  AND depth_m BETWEEN %s AND %s
+ORDER BY distance ASC
+LIMIT %s;
+```
+
+Distance is converted to cosine similarity via `similarity = 1.0 - distance`, then normalised to `[0, 1]` as `semantic_norm = (similarity + 1) / 2`.
+
+**Ingesting events into pgvector:**
+
+```python
+from rag.pgvector_backend import ingest_events_to_pgvector
+from rag.embeddings import GeminiEmbeddingProvider
+
+ingested = ingest_events_to_pgvector(
+    events=historical_events,
+    provider=GeminiEmbeddingProvider(),
+    batch_size=50,
+)
+print(f"Ingested {ingested} documents")
+```
+
+## Hybrid Retrieval
+
+Both backends ultimately use `HybridRetriever` (or equivalent pgvector scoring) to rank results by a weighted combination of **semantic similarity** and **structured score**:
+
+```
+hybrid_score = SEMANTIC_WEIGHT × semantic_norm + STRUCTURED_WEIGHT × structured_score
+```
+
+- **`SEMANTIC_WEIGHT`** = 0.60
+- **`STRUCTURED_WEIGHT`** = 0.40
+
+The structured score rewards candidates that match the query's `formation`, fall within the `depth_tolerance` window, match `event_type`, and belong to `nearby_well_ids`. Results are sorted descending by `hybrid_score`, with `semantic_similarity` as the tiebreaker.
+
+## Document Builder
+
+`events_to_documents()` converts raw historical event dicts into plain-text documents suitable for embedding. Each document has a `"text"` field (the embeddable string) and a `"metadata"` field preserving the original structured data:
+
+```python
+from rag.document_builder import events_to_documents
+
+docs = events_to_documents(events)
+# Returns:
+# [
+#   {
+#     "text": "Well: A-17\nDepth: 2810 m\nFormation: Formation X\n...",
+#     "metadata": {"well_id": "A-17", "depth_m": 2810, ...}
+#   },
+#   ...
+# ]
+```
+
+## Usage Examples
+
+```python
+# In-memory retrieval with cached embeddings
+from rag.retrieval_service import RAGRetrievalService
+from rag.embeddings import GeminiEmbeddingProvider
+
+provider = GeminiEmbeddingProvider()
+service = RAGRetrievalService(
+    events=historical_events,
+    provider=provider,
+    backend="in_memory",
+    auto_prepare=True,
+)
+
+results = service.retrieve(
+    query="What caused stuck pipe incidents in Formation X near 2800m?",
+    current_depth=2800.0,
+    formation="Formation X",
+    depth_tolerance=100.0,
+    nearby_well_ids=["A-17", "C-04", "G-33"],
+    top_k=5,
+)
+
+for r in results:
+    print(r["metadata"]["well_id"], r["hybrid_score"])
+```
+
+```python
+# pgvector mode
+service = RAGRetrievalService(
+    provider=GeminiEmbeddingProvider(),
+    backend="pgvector",
+)
+
+results = service.retrieve(
+    query="Differential sticking mitigation techniques",
+    formation="Formation X",
+    top_k=3,
+)
+```
+
+<Tip>
+Set `RAG_BACKEND=pgvector` in your `.env` file to switch the production deployment from in-memory to PostgreSQL vector search without any code changes. The `get_rag_service()` singleton in `main.py` re-initialises automatically when the environment variable changes between requests.
+</Tip>

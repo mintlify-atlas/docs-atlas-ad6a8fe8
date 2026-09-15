@@ -1,0 +1,163 @@
+---
+title: "GIS Spatial Well Filtering with Haversine Distance"
+sidebarTitle: "GIS Engine"
+description: "How GeoMine uses the Haversine formula to filter offset wells within a configurable km radius around the active rig, with PostGIS geometry support."
+---
+
+Every NWIS risk analysis begins with a spatial question: which historical wells are close enough to the active rig to be geologically relevant? The GIS Spatial Engine answers this by computing the great-circle distance between the rig's GPS coordinates and every known well in the database. Only wells within the operator-configured search radius are passed to the Historical Intelligence Engine, ensuring that pattern analysis is always geographically constrained and that distant wells in completely different geological settings do not pollute the risk model.
+
+## `haversine_km()` Function
+
+The engine uses the standard Haversine formula with Earth radius R = 6371 km. The function is defined in `gis_module.py` and is used for all static well lookups:
+
+```python
+import math
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+```
+
+A second inline `haversine()` function in `main.py` is used for dynamic database well filtering:
+
+```python
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2)**2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2)**2)
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+```
+
+Both functions return distance in kilometres (km) as a `float`.
+
+## `get_nearby_wells()`
+
+`get_nearby_wells()` iterates over the static `WELLS` reference dataset and returns all non-active wells within `radius_km` of the given coordinates, sorted closest-first:
+
+```python
+def get_nearby_wells(lat: float, lon: float, radius_km: float) -> list:
+    nearby = []
+    for w in WELLS:
+        if w.get('is_active') == 1:
+            continue  # Skip the active rig itself
+
+        dist = haversine_km(lat, lon, w['lat'], w['lon'])
+
+        if dist <= radius_km:
+            nearby.append({
+                "well_id": w['well_id'],
+                "distance_km": round(dist, 2),
+                "latitude": w['lat'],
+                "longitude": w['lon']
+            })
+
+    return sorted(nearby, key=lambda x: x["distance_km"])
+```
+
+<ParamField path="lat" type="float" required>
+  Latitude of the active rig or query point in decimal degrees.
+</ParamField>
+
+<ParamField path="lon" type="float" required>
+  Longitude of the active rig or query point in decimal degrees.
+</ParamField>
+
+<ParamField path="radius_km" type="float" required>
+  Search radius in kilometres. The API default is `5.0 km`; the knowledge search default is `50.0 km`.
+</ParamField>
+
+**Returns:** A list of dicts with `well_id`, `distance_km`, `latitude`, and `longitude`, ordered by ascending distance.
+
+## The WELLS Dataset
+
+`gis_module.py` contains a static reference dataset of 30 wells in the Duliajan field (Assam, India). `OIL-DLJ-99` is the active rig (`is_active: 1`) and is excluded from offset well searches. All other wells carry historical incident data.
+
+| Well ID | Field | Formation at 2780m | Event Type | Event Note |
+|---------|-------|-------------------|------------|------------|
+| `OIL-DLJ-99` | Duliajan | Formation X | None | Active rig |
+| `A-17` | Duliajan | Formation X | Stuck Pipe | Pack-off after torque spike |
+| `B-09` | Duliajan | Formation X | Torque Spike | High torque in shale |
+| `C-04` | Duliajan | Formation X | Stuck Pipe | Differential sticking |
+| `D-12` | Duliajan | Formation Y | Mud Loss | Lost circulation in limestone |
+| `E-21` | Duliajan | Formation X | Mud Loss | Partial losses while drilling |
+| `G-33` | Duliajan | Formation X | Stuck Pipe | Hole pack-off at shale interface |
+| `J-19` | Duliajan | Formation X | Stuck Pipe | Differential sticking after losses |
+| `N-40` | Duliajan | Formation X | Stuck Pipe | Tight hole then stuck |
+| `Y-16` | Duliajan | Formation X | Stuck Pipe | Classic stuck-pipe analog |
+| `AC-20` | Duliajan | Formation X | Stuck Pipe | Stuck in Formation X |
+
+<Note>
+The full dataset contains 30 wells (IDs `OIL-DLJ-99` through `AC-20`) spread across a roughly 6 km × 6 km bounding box centred on coordinates approximately `27.35°N, 95.32°E`. Formations recorded at 2780 m include Formation X, Formation Y, and Formation Z.
+</Note>
+
+## API Integration
+
+In the live `/api/analyze_risk` endpoint, GIS filtering is performed against the **PostgreSQL database** rather than the static dataset. Events are loaded from `load_historical_events()` and each event's `latitude`/`longitude` fields are used to compute distance on the fly:
+
+```python
+valid_well_ids = []
+for e in db_events:
+    w_lat, w_lon = e.get("latitude"), e.get("longitude")
+    if w_lat and w_lon and haversine(payload.lat, payload.lon, w_lat, w_lon) <= payload.search_radius_km:
+        valid_well_ids.append(e["well_id"])
+
+valid_well_ids = list(set(valid_well_ids))
+```
+
+The deduplicated `valid_well_ids` list is then passed directly to `analyze_well()` as the `nearby_well_ids` parameter. This means the spatial radius is enforced at the **event level**, not the well level — a single well can have events at different coordinates and only the in-radius events will be retrieved.
+
+## Strict Spatial Post-Filter
+
+After `analyze_well()` builds the `ui_wells` map payload, a second spatial filter is applied to drop any event whose coordinates fall outside the requested radius. This guards against data quality issues where a well ID has multiple coordinate entries in the database:
+
+```python
+for w in intel_result["historical_events"]:
+    w_lat = w.get("latitude", 0)
+    w_lon = w.get("longitude", 0)
+    real_distance = haversine(payload.lat, payload.lon, w_lat, w_lon)
+
+    # STRICT SPATIAL FILTER: drop events outside the radius
+    if real_distance > payload.search_radius_km:
+        logger.info(f"DROPPED WELL {w.get('well_id')} — distance {real_distance:.2f} > {payload.search_radius_km}")
+        continue
+
+    ui_wells.append({
+        "well_id": w["well_id"],
+        "distance_km": round(real_distance, 2),  # real physical distance
+        ...
+    })
+```
+
+The `distance_km` field shown in the dashboard's "Top Analog Offset Matches" panel is always the real computed Haversine distance, never an estimated value.
+
+## Code Example
+
+```python
+from gis_module import haversine_km, get_nearby_wells
+
+# Active rig position (Duliajan Sector 4)
+rig_lat, rig_lon = 27.35, 95.32
+
+# Find all historical wells within 5 km
+nearby = get_nearby_wells(rig_lat, rig_lon, radius_km=5.0)
+
+for w in nearby:
+    print(f"{w['well_id']}: {w['distance_km']} km")
+# A-17: 1.38 km
+# C-04: 0.72 km
+# G-33: 2.51 km
+
+# Direct haversine calculation
+dist = haversine_km(27.35, 95.32, 27.361, 95.328)
+print(f"Distance to A-17: {dist:.2f} km")  # ~1.38 km
+```

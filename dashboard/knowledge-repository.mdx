@@ -1,0 +1,278 @@
+---
+title: "Searchable Drilling Knowledge Repository with NLP Search"
+sidebarTitle: "Knowledge Repository"
+description: "Tab 5 of the GeoMine dashboard provides natural language search over the historical drilling events database using RAG and Gemini, returning evidence-ranked incident records."
+---
+
+The **Searchable Knowledge Repository** (Tab 5) transforms the historical drilling events database into a queryable intelligence asset. Rather than filtering a static table, engineers ask questions in plain English — the backend parses the intent using Gemini NLP, performs a hybrid vector-and-keyword RAG search over the PostgreSQL knowledge base, and returns incident records ranked by relevance score. Each result is expandable to reveal root cause, mitigation applied, and operational outcome. A **Historical Inference** synthesis at the end of each result set extracts cross-incident patterns using Gemini, surfacing the geological and operational lessons that span multiple events.
+
+---
+
+## Natural Language Queries
+
+The search interface accepts any free-form drilling question. Engineers do not need to know column names or filter syntax — the Gemini parser extracts structured parameters (depth, formation, event type, depth tolerance) automatically.
+
+Below are representative queries demonstrating the range of intelligence the repository can surface:
+
+```
+What Gas Kicks happened at 2800m in Kopili Shale?
+```
+```
+Show stuck pipe incidents above 3000m
+```
+```
+Which wells had mud losses in Barail Coal-Shale?
+```
+```
+What mitigations were used for torque spikes in Formation X?
+```
+```
+Were there any differential sticking events near 2780m in the Duliajan field?
+```
+```
+What caused the pack-off incidents between 2750m and 2850m?
+```
+```
+Show all high-risk events nearby in the last corridor
+```
+
+The query parser extracts the following structured fields from the natural language input and displays them in an **AI Parsed Query** banner above the results:
+
+| Parsed Field | Example Value | Description |
+|---|---|---|
+| `current_depth` | `2800` | Target depth in metres extracted from the query |
+| `formation` | `Kopili Shale` | Formation name identified in the query |
+| `event_type` | `Gas Kick` | Incident type filter, or `"All types"` if not specified |
+| `depth_tolerance` | `±100 m` | Depth window applied around `current_depth` |
+
+---
+
+## Proximity-Aware Search
+
+The search system is context-aware: it detects whether the engineer is asking about the general knowledge base or specifically about wells in the vicinity of the active rig. Detection is based on a list of proximity keywords embedded in the query:
+
+```python
+proximity_keywords = [
+    "nearby",
+    "close by",
+    "around here",
+    "this area",
+    "this region",
+    "local",
+    "surrounding",
+    "radius",
+]
+```
+
+**If a proximity keyword is detected**, the search is pre-filtered to `valid_well_ids` — the set of well IDs within the currently active search radius. Only incidents from those nearby wells are returned, regardless of formation or depth match against the full database.
+
+**If no proximity keyword is detected**, the search queries the entire historical events database globally. This is the default behavior for most analytical queries like *"What caused stuck pipe in Kopili Shale?"* where the engineer wants comprehensive pattern data across all recorded wells.
+
+The search payload sent to the backend always includes the active rig's coordinates and the current radius so the backend can resolve `valid_well_ids` dynamically:
+
+```python
+requests.post(
+    f"{BACKEND_URL}/api/search_knowledge",
+    json={
+        "question": search_query,
+        "lat": 27.35,
+        "lon": 95.32,
+        "radius_km": float(st.session_state.get("active_radius_km", 50.0))
+    },
+    timeout=60
+)
+```
+
+---
+
+## Search Results
+
+Each retrieved incident is displayed as a collapsible card, sorted by relevance score descending. The card label line shows:
+
+```
+{icon}  {well_id} — {event_type}  |  Depth: {depth_m} m  |  Relevance: {score:.2f}%  |  Δ{depth_difference_m:.0f} m from query depth
+```
+
+Expanding a card reveals three summary columns (Well, Formation, Depth) followed by a color-coded incident detail block:
+
+| Field | Color | Description |
+|---|---|---|
+| **Incident Type** | Event type color | The classified drilling event (e.g. Stuck Pipe Incident, Gas Kick, Severe Mud Loss) |
+| **Root Cause** | Amber `#f7a800` | Engineering root cause extracted from the DDR record |
+| **Mitigation** | Cyan `#00d4ff` | Operational action taken to resolve the incident |
+| **Outcome** | Green `#00cc6a` | Final result after mitigation (e.g. free string recovered, total losses controlled) |
+
+The event type color coding applied to result cards mirrors the map and trend chart scheme:
+
+| `event_type` | Hex Color |
+|---|---|
+| `Stuck Pipe Incident` | `#ff4b4b` |
+| `Gas Kick` | `#ff4b4b` |
+| `Severe Mud Loss` | `#f7a800` |
+| `Shale Instability` | `#f7a800` |
+| `Torque Spike` | `#f7a800` |
+| `Normal Operation` | `#00cc6a` |
+
+The `relevance_score` displayed on each card is derived from the RAG engine's `hybrid_score` field. When `hybrid_score` is in the range 0–1.0 it is converted to a percentage (e.g. `0.8643` → `86.43%`).
+
+The `depth_difference_m` field shows the absolute difference between the incident's `depth_m` and the depth parsed from the query (`parsed_query.current_depth`), giving engineers an at-a-glance measure of how closely each result matches the queried depth horizon.
+
+---
+
+## Historical Inference
+
+After all incident cards are rendered, the system displays a **Historical Inference** section synthesizing patterns across the full retrieved result set. This section is generated by Gemini from the RAG answer and appears only when the backend returns a non-empty `answer` field.
+
+The inference text is extracted from the Gemini response using the following parsing logic:
+
+```python
+if "Historical Inference:" in rag_answer:
+    inference_text = rag_answer.split("Historical Inference:", 1)[1].strip()
+elif "Historical Inference" in rag_answer:
+    inference_text = rag_answer.split("Historical Inference", 1)[1].lstrip(":").strip()
+else:
+    inference_text = rag_answer.strip()
+```
+
+The extracted inference is displayed in a teal-bordered card:
+
+```
+Historical Inference:
+┌─────────────────────────────────────────────────────────────┐
+│  {Gemini synthesis of patterns across all returned events}  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+This section might summarize observations such as: *"Seven of the nine retrieved stuck-pipe incidents occurred within 50 m of the Kopili Shale / Formation X boundary, consistently at depths between 2,775 m and 2,825 m, suggesting a predictable lithological transition hazard zone."*
+
+<Tip>
+The Historical Inference output is ideal for pre-drill well planning meetings. Run a formation-specific query before spudding and copy the inference text into the Pre-Job Risk Assessment (PJRA) documentation.
+</Tip>
+
+---
+
+## Search Metrics
+
+When search results are returned, a row of metric cards appears above the incident list. The layout adapts based on whether a single dominant event type is identifiable:
+
+**When a dominant event type exists** (one event type strictly outnumbers all others — no ties):
+
+```
+┌──────────────────┬─────────────────┬──────────────────┬──────────────┐
+│ Incidents Found  │  Unique Wells   │  Dominant Event  │   Avg Depth  │
+│       12         │       9         │   Stuck Pipe     │   2,798.3 m  │
+└──────────────────┴─────────────────┴──────────────────┴──────────────┘
+```
+
+**When event types are tied or no clear dominant type** (three-column layout, Dominant Event omitted):
+
+```
+┌──────────────────┬─────────────────┬──────────────┐
+│ Incidents Found  │  Unique Wells   │   Avg Depth  │
+│        8         │        6        │   2,801.5 m  │
+└──────────────────┴─────────────────┴──────────────┘
+```
+
+The metrics are computed from the `rag_evidence` array when RAG results are available, or from the `pattern_analysis` object in the `historical_intelligence` response otherwise:
+
+| Metric | Source |
+|---|---|
+| **Incidents Found** | `len(display_events)` |
+| **Unique Wells** | `len(set(e["well_id"] for e in display_events))` |
+| **Dominant Event** | `Counter(ev_types).most_common()` — displayed only if strictly one type leads |
+| **Avg Depth** | Mean of all `depth_m` values across result events |
+
+---
+
+## Document Ingestion
+
+Tab 5 also exposes an **Automated Document Ingestion** expander at the top of the page, enabling engineers to grow the knowledge base from unstructured field documents:
+
+<Steps>
+
+  <Step title="Expand the ingestion panel">
+    Click **Upload & Ingest New Document** to expand the text area.
+  </Step>
+
+  <Step title="Paste raw report text">
+    Copy and paste the content of a Daily Drilling Report (DDR), Well Completion Report, or any relevant field note into the text area. Example:
+
+    ```
+    On 12-Oct, Well OIL-ABC-99 experienced a severe stuck pipe at 2650m
+    in the Barail Sandstone due to differential sticking. Spotted 50bbl
+    of pipe laxative to free string...
+    ```
+  </Step>
+
+  <Step title="Extract & Structure Knowledge">
+    Click **Extract & Structure Knowledge**. The dashboard POSTs the raw text to `{BACKEND_URL}/api/ingest_report`. Gemini AI extracts structured parameters (well ID, depth, formation, event type, cause, mitigation, outcome) and appends them as a new record in the PostgreSQL knowledge base.
+  </Step>
+
+  <Step title="Review extracted data">
+    On success, the dashboard displays a `st.success` confirmation and renders the `extracted_data` JSON returned by the backend for review before the next search.
+  </Step>
+
+</Steps>
+
+---
+
+## Backend Endpoint
+
+The knowledge search is powered by a dedicated API endpoint:
+
+```
+POST /api/search_knowledge
+```
+
+**Request body:**
+
+```json
+{
+  "question": "What stuck pipe events occurred near 2800m in Kopili Shale?",
+  "lat": 27.35,
+  "lon": 95.32,
+  "radius_km": 45.0
+}
+```
+
+**Response structure:**
+
+```json
+{
+  "parsed_query": {
+    "current_depth": 2800,
+    "formation": "Kopili Shale",
+    "event_type": "Stuck Pipe",
+    "depth_tolerance": 100
+  },
+  "rag_evidence": [
+    {
+      "hybrid_score": 0.8643,
+      "metadata": {
+        "well_id": "Y-16",
+        "depth_m": 2800,
+        "formation": "Kopili Shale",
+        "event_type": "Stuck Pipe Incident",
+        "cause": "Differential sticking in high mud weight section",
+        "mitigation": "Pipe freeing pill deployed, string rotated free",
+        "outcome": "String recovered after 6 hours, resumed drilling"
+      }
+    }
+  ],
+  "historical_intelligence": {
+    "historical_events": [],
+    "pattern_analysis": {
+      "total_events": 9,
+      "unique_wells": 7,
+      "average_depth": 2798.3
+    }
+  },
+  "answer": "Historical Inference: Seven of the nine retrieved incidents..."
+}
+```
+
+For API reference documentation, see the [Search Knowledge endpoint](/api/search-knowledge).
+
+<Warning>
+The knowledge search endpoint has a 60-second timeout configured in the Streamlit client. Complex queries over large knowledge bases with Gemini re-ranking may approach this limit. If queries time out consistently, request that the backend team increase the vector search result limit or pre-filter by formation before reranking.
+</Warning>

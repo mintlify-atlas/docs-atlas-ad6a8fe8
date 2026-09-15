@@ -1,72 +1,91 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "GeoMine — NWIS Drilling Risk & Spatial Intelligence",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
-  },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "primary": "#38bdf8",
+    "light": "#e0f2fe",
+    "dark": "#0f172a"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/jisjthomass/Geomine"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/jisjthomass/Geomine"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Core Modules",
+            "pages": [
+              "modules/ml-risk-engine",
+              "modules/historical-intelligence",
+              "modules/gis-spatial-engine",
+              "modules/rag-retrieval",
+              "modules/ocr-pipeline",
+              "modules/npt-analyzer",
+              "modules/physics-engine"
+            ]
+          },
+          {
+            "group": "Dashboard",
+            "pages": [
+              "dashboard/overview",
+              "dashboard/telemetry-controls",
+              "dashboard/gis-spatial-command",
+              "dashboard/knowledge-repository"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker-setup",
+              "deployment/environment-variables",
+              "deployment/database-schema"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "REST Endpoints",
+            "pages": [
+              "api/overview",
+              "api/analyze-risk",
+              "api/search-knowledge",
+              "api/ingest-report",
+              "api/upload-report",
+              "api/npt-analysis",
+              "api/environmental-risk",
+              "api/mitigation-queue"
+            ]
+          },
+          {
+            "group": "WebSocket",
+            "pages": [
+              "api/websocket-telemetry"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,0 +1,192 @@
+---
+title: "OCR Document Ingestion Pipeline for Drilling Reports"
+sidebarTitle: "OCR Pipeline"
+description: "GeoMine's enterprise OCR pipeline extracts structured drilling event data from PDF, DOCX, XLSX, and image files using PyMuPDF, Tesseract, and Ollama/Gemini LLMs."
+---
+
+Decades of drilling history in the Duliajan and Assam fields exist as scanned PDFs, legacy Word documents, and handwritten log sheets — none of it queryable by the NWIS intelligence engine. The OCR Pipeline bridges this gap by ingesting any document format, extracting raw text through a layered extraction strategy, classifying the document type, running a local or cloud LLM to produce structured JSON, enforcing schema compliance, validating coordinates and field values, and optionally writing the result directly to the `historical_drilling_events` and `underground_infrastructure` PostgreSQL tables with a full audit trail.
+
+## Supported File Types
+
+<CardGroup cols={2}>
+  <Card title="PDF Documents" icon="file-pdf">
+    PyMuPDF native text extraction (primary) with Tesseract OCR fallback at 200 DPI for scanned/image-only pages. Table-aware extraction included in `ocr_pipeline_ollama.py`.
+  </Card>
+  <Card title="Word Documents (DOCX)" icon="file-word">
+    Extracts paragraphs and table cells using `python-docx`. Returns all non-empty paragraphs joined by newlines.
+  </Card>
+  <Card title="Excel Spreadsheets (XLSX/XLS)" icon="file-excel">
+    Reads all sheets with `openpyxl`, pipe-delimited row concatenation for each sheet.
+  </Card>
+  <Card title="Images (JPG, PNG, TIFF)" icon="image">
+    Grayscale conversion → contrast boost → edge sharpening → Tesseract OCR. Supports `.jpg`, `.jpeg`, `.png`, `.tiff`, `.tif`, `.bmp`.
+  </Card>
+</CardGroup>
+
+<Note>
+The enterprise pipeline (`ocr_pipeline_ollama.py`) routes files automatically using the `extract_text()` dispatcher. It also applies image pre-processing (contrast enhancement + binarization) on scanned PDF pages for improved OCR accuracy.
+</Note>
+
+## Extraction Pipeline
+
+`process_single_file()` drives the full enterprise pipeline for a single file:
+
+<Steps>
+  <Step title="File Hashing & Duplicate Detection">
+    A SHA-256 hash of the file is computed using `compute_file_hash()`. If an identical hash exists in the `processed_files` table, the file is marked `DUPLICATE` and skipped immediately — preventing the same report from polluting the database twice.
+  </Step>
+  <Step title="Text Extraction">
+    `extract_text()` dispatches to the appropriate extractor by file extension:
+    
+    ```python
+    def extract_text(file_path: Path) -> str:
+        ext = file_path.suffix.lower()
+        if ext == ".pdf":      return extract_text_from_pdf(file_path)
+        elif ext == ".docx":   return extract_text_from_docx(file_path)
+        elif ext in (".xlsx", ".xls"): return extract_text_from_xlsx(file_path)
+        elif ext in (".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"):
+            return extract_text_from_image(file_path)
+    ```
+    
+    For PDFs, native PyMuPDF `page.get_text()` is attempted first. If the page yields no text (scanned page), `_ocr_page()` is called with image pre-processing at 200 DPI.
+  </Step>
+  <Step title="Document Classification">
+    The first 3,000 characters are sent to the LLM to classify the document before expensive extraction begins. Valid classes are: `drilling_report`, `completion_report`, `incident_report`, `annual_report`, `procurement`, `other`. Documents classified as `procurement` or `other` are skipped.
+  </Step>
+  <Step title="LLM Extraction">
+    The full text (chunked at 12,000 characters with 500-character overlap) is sent to the LLM with a structured prompt demanding two JSON objects:
+    
+    - **`drilling_event`** — `well_id`, `latitude`, `longitude`, `event_depth`, `event_type`, `formation`, `npt_duration_minutes`, `npt_category`, `summary`
+    - **`infrastructure`** — `infra_id`, `latitude`, `longitude`, `depth_m`, `infra_type`
+    
+    For multiple chunks, the result with the highest confidence score wins.
+  </Step>
+  <Step title="Schema Enforcement">
+    `enforce_schema()` strips any hallucinated fields not in the schema, casts values to correct types (`float`, `int`, `str`), and sanitises junk strings (`"null"`, `"n/a"`, `"none"`, `"-"`, etc.) to `None`.
+  </Step>
+  <Step title="Validation">
+    Coordinate ranges, depth ranges, and NPT duration are validated:
+    
+    | Field | Valid Range |
+    |-------|------------|
+    | Latitude | −90.0 to 90.0 |
+    | Longitude | −180.0 to 180.0 |
+    | Depth | 0.0 to 15,000.0 m |
+    | NPT Duration | 0 to 10,080 minutes |
+    
+    **Tier 3: India bounding box cross-validation** — coordinates outside India (`Lat: 6.5–37.0°N`, `Lon: 68.0–97.5°E`) generate a warning but do not block insertion.
+  </Step>
+  <Step title="Database Insertion">
+    If `insert_to_db=True` and the record has at least 2 non-null fields, `insert_drilling_event()` and `insert_infrastructure()` write to PostgreSQL with full audit fields: `source_file`, `file_hash`, `document_class`, `extraction_confidence`, `processed_at`.
+  </Step>
+</Steps>
+
+### Regex-Based Extraction (Basic Pipeline)
+
+`ocr_pipeline.py` (the Gemini/basic variant) also provides `parse_drilling_events()` and `parse_underground_infrastructure()` for regex-based extraction without an LLM:
+
+```python
+# Drilling event field patterns
+well_id    = re.search(r'(?:Well\s*(?:ID|#)?[:\s]+)([A-Za-z0-9_\-]+)', text, re.IGNORECASE)
+lat        = re.search(r'(?:Latitude|Lat)[:\s]+([-+]?\d*\.\d+|\d+)', text, re.IGNORECASE)
+lon        = re.search(r'(?:Longitude|Long|Lon)[:\s]+([-+]?\d*\.\d+|\d+)', text, re.IGNORECASE)
+depth      = re.search(r'(?:Event\s*Depth|Depth)[:\s]+(\d+(?:\.\d+)?)\s*(?:m|ft)?', text, re.IGNORECASE)
+event_type = re.search(r'(?:Event\s*Type|Event)[:\s]+([A-Za-z\s]+)', text, re.IGNORECASE)
+formation  = re.search(r'(?:Formation)[:\s]+([A-Za-z0-9\s]+)', text, re.IGNORECASE)
+npt_duration = re.search(r'(?:NPT\s*Duration|NPT\s*Time)[:\s]+(\d+)\s*(?:min|mins|minutes)?', text, re.IGNORECASE)
+npt_category = re.search(r'(?:NPT\s*Category|NPT\s*Type)[:\s]+([A-Za-z0-9\s_\-]+)', text, re.IGNORECASE)
+
+# Infrastructure field patterns
+infra_id   = re.search(r'(?:Infra\s*ID|Infrastructure\s*ID)[:\s]+([A-Za-z0-9_\-]+)', text, re.IGNORECASE)
+infra_type = re.search(r'(?:Infra\s*Type|Type)[:\s]+(Aquifer|Pipeline)', text, re.IGNORECASE)
+```
+
+## OCR Correction Feedback Loop
+
+Engineers can correct wrong extractions via `PATCH /api/ocr_correction`. This records the correction in the `ocr_corrections` audit table and applies it directly to the original record:
+
+```python
+class CorrectionPayload(BaseModel):
+    record_type: str   # 'drilling_event' or 'infrastructure'
+    record_id: int     # Database row ID
+    field_name: str    # Column name to correct
+    old_value: str     # Original extracted value (for audit)
+    new_value: str     # Corrected value
+```
+
+The endpoint routes `record_type` to the correct table (`historical_drilling_events` or `underground_infrastructure`) and executes a parameterised `UPDATE` query.
+
+## Local vs Cloud Extraction
+
+| Pipeline File | LLM Backend | Use Case |
+|---------------|-------------|----------|
+| `OCR/ocr_pipeline.py` | **Gemini** (cloud) | Production with Google API key; includes basic regex extraction |
+| `OCR/ocr_pipeline_ollama.py` | **Ollama** (local) | Air-gapped / offline deployments; full enterprise feature set |
+| Local Tesseract only | None | Raw text extraction only via `extract_text_from_pdf()` |
+
+The Ollama pipeline configuration:
+
+```python
+OLLAMA_URL  = os.environ.get("OLLAMA_URL",  "http://localhost:11434/api/generate")
+MODEL_NAME  = os.environ.get("OLLAMA_MODEL", "phi3")
+```
+
+The active API endpoint (`POST /api/upload_report`) always uses `ocr_pipeline_ollama.process_single_file()`.
+
+## API Usage: Upload a Report
+
+```bash
+# Upload a PDF without inserting to database (dry run)
+curl -X POST "http://localhost:8000/api/upload_report" \
+  -F "file=@daily_drilling_report_2024.pdf"
+
+# Upload and insert to database
+curl -X POST "http://localhost:8000/api/upload_report?insert=true" \
+  -F "file=@incident_report_well_a17.pdf"
+```
+
+**Example response:**
+
+```json
+{
+  "status": "PROCESSED",
+  "document_class": "incident_report",
+  "drilling_event": {
+    "well_id": "A-17",
+    "latitude": 27.361,
+    "longitude": 95.328,
+    "event_depth": 2810.0,
+    "event_type": "Stuck Pipe",
+    "formation": "Formation X",
+    "npt_duration_minutes": 480,
+    "npt_category": "Mechanical",
+    "summary": "Differential sticking at 2810m in Formation X following torque spike."
+  },
+  "infrastructure": {
+    "infra_id": null,
+    "latitude": null,
+    "longitude": null,
+    "depth_m": null,
+    "infra_type": null
+  },
+  "event_confidence": 77.8,
+  "infra_confidence": 0.0,
+  "warnings": [],
+  "db_event_id": 142,
+  "db_infra_id": null
+}
+```
+
+**Submit a correction:**
+
+```bash
+curl -X PATCH "http://localhost:8000/api/ocr_correction" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "record_type": "drilling_event",
+    "record_id": 142,
+    "field_name": "event_depth",
+    "old_value": "2810.0",
+    "new_value": "2795.0"
+  }'
+```

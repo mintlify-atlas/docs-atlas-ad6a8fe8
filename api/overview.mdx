@@ -1,0 +1,107 @@
+---
+title: "GeoMine API Reference — NWIS Backend Hub"
+sidebarTitle: "Overview"
+description: "Overview of all GeoMine NWIS REST endpoints: risk analysis, knowledge search, OCR ingestion, NPT analytics, environmental risk, HITL mitigation queue, and WebSocket telemetry."
+---
+
+GeoMine's **NWIS Backend Hub** is a FastAPI-powered backend that wires together ML risk scoring, GIS spatial filtering, Gemini-powered RAG historical intelligence, enterprise OCR ingestion, real-time WebSocket telemetry, and a Human-in-the-Loop mitigation approval queue into one coherent drilling risk platform. The application is titled `"NWIS Backend Hub"` and exposes all endpoints under the `/api/` prefix, with the exception of the health check at `GET /`. The base URL for all requests is `http://localhost:8000`.
+
+## Authentication
+
+No authentication is required in the current version of the API. CORS middleware is configured with `allow_origins=["*"]`, meaning requests from any origin are accepted. All HTTP methods and headers are permitted.
+
+```
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: *
+Access-Control-Allow-Headers: *
+```
+
+## Base URL
+
+**Local development (Python / `uvicorn`):**
+
+```bash
+http://localhost:8000
+```
+
+**Docker Compose deployment:**
+
+```bash
+http://localhost:8000   # host port mapped to container port 8000
+```
+
+Set the base URL as an environment variable in your frontend or API client to switch between environments without touching request code:
+
+```bash
+export NWIS_API_BASE=http://localhost:8000
+```
+
+## Endpoints Summary
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Health check — confirms the backend is online |
+| `POST` | `/api/analyze_risk` | Core orchestrator: ML scoring + GIS filter + RAG historical intelligence |
+| `POST` | `/api/generate_ai_summary` | Async-only Gemini AI narrative summary for lazy UI loading |
+| `POST` | `/api/search_knowledge` | RAG NLP natural-language search over the historical events database |
+| `POST` | `/api/ingest_report` | Text report ingestion: Gemini extracts structured data and inserts to DB |
+| `POST` | `/api/upload_report` | Enterprise OCR file upload (PDF, DOCX, XLSX, images) |
+| `PATCH` | `/api/ocr_correction` | Submit a field-level correction for an OCR-extracted record |
+| `POST` | `/api/analyze_npt` | NPT financial cost analysis vs. GIS-filtered historical offset wells |
+| `POST` | `/api/environmental_risk` | Environmental and underground infrastructure risk at current depth |
+| `POST` | `/api/mitigation/queue` | Queue an AI-generated mitigation plan for human review |
+| `GET` | `/api/mitigation/pending` | List all mitigation plans currently awaiting engineer approval |
+| `POST` | `/api/mitigation/approve/{queue_id}` | Approve and dispatch a queued mitigation plan to the active rig |
+| `WS` | `/ws/telemetry/{well_id}` | Real-time WebSocket telemetry stream with physics (MSE/stick-slip) analysis |
+
+## Content Type
+
+All `POST` and `PATCH` endpoints accept and return `application/json` **except** `/api/upload_report`, which accepts `multipart/form-data` for binary file uploads.
+
+| Endpoint | Request Content-Type |
+|----------|----------------------|
+| All `POST` / `PATCH` endpoints | `application/json` |
+| `POST /api/upload_report` | `multipart/form-data` |
+| `WS /ws/telemetry/{well_id}` | JSON text frames over WebSocket |
+
+## Error Handling
+
+FastAPI returns standard HTTP status codes. Application-level errors return a JSON body with a `status` field set to `"error"` and a `message` field describing the failure:
+
+```json
+{
+  "status": "error",
+  "message": "Detailed description of what went wrong"
+}
+```
+
+Validation errors from Pydantic (e.g., missing required fields, type mismatches) return HTTP `422 Unprocessable Entity` with a structured `detail` array pointing to each offending field.
+
+## Explore Endpoints
+
+<CardGroup cols={2}>
+  <Card title="POST /analyze_risk" icon="chart-mixed" href="/api/analyze-risk">
+    Core drilling risk orchestrator — ML + GIS + RAG in one call
+  </Card>
+  <Card title="POST /search_knowledge" icon="magnifying-glass" href="/api/search-knowledge">
+    Natural-language RAG search over historical drilling events
+  </Card>
+  <Card title="POST /ingest_report" icon="file-import" href="/api/ingest-report">
+    Ingest raw drilling report text with Gemini extraction
+  </Card>
+  <Card title="POST /upload_report" icon="upload" href="/api/upload-report">
+    Enterprise OCR pipeline for PDF, DOCX, XLSX, and image files
+  </Card>
+  <Card title="POST /analyze_npt" icon="clock" href="/api/npt-analysis">
+    NPT financial cost analysis at ₹20 lakh/day
+  </Card>
+  <Card title="POST /environmental_risk" icon="leaf" href="/api/environmental-risk">
+    Aquifer and gas pipeline proximity risk assessment
+  </Card>
+  <Card title="Mitigation Queue" icon="list-check" href="/api/mitigation-queue">
+    Human-in-the-Loop approval workflow for AI mitigation plans
+  </Card>
+  <Card title="WS /ws/telemetry" icon="tower-broadcast" href="/api/websocket-telemetry">
+    Real-time telemetry stream with MSE and stick-slip detection
+  </Card>
+</CardGroup>

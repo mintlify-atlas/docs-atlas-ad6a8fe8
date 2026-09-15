@@ -1,0 +1,151 @@
+---
+title: "HITL Mitigation Queue — Human-in-the-Loop Approval Workflow"
+sidebarTitle: "Mitigation Queue"
+description: "The Human-in-the-Loop mitigation queue lets AI generate drilling hazard mitigation plans that engineers review, approve, and dispatch to the active rig."
+---
+
+The NWIS HITL (Human-in-the-Loop) mitigation queue is a three-step workflow that ensures AI-generated drilling hazard mitigation plans are reviewed by a qualified engineer before being dispatched to the active rig. When the risk engine detects a critical hazard, the AI generates a mitigation plan and submits it to the queue via `POST /api/mitigation/queue`. The plan enters a `PENDING_REVIEW` state and appears in the engineer's dashboard. After review, the engineer calls `POST /api/mitigation/approve/{queue_id}` to mark it `APPROVED` and trigger dispatch. At any time, `GET /api/mitigation/pending` lists all plans awaiting human review.
+
+## POST /api/mitigation/queue
+
+Submits an AI-generated mitigation plan for a detected well hazard. Returns a unique queue ID that the engineer uses to track and approve the plan.
+
+<ParamField body="well_id" type="string" required>
+  Identifier of the well where the hazard was detected.
+
+  **Example:** `"OIL-4412"`
+</ParamField>
+
+<ParamField body="hazard_type" type="string" required>
+  The category of hazard the mitigation plan addresses.
+
+  **Example:** `"Stuck Pipe"`, `"Mud Loss"`, `"Torque Spike"`, `"Kick"`
+</ParamField>
+
+<ParamField body="ai_mitigation_plan" type="string" required>
+  The full text of the AI-generated mitigation plan, typically produced by Gemini based on the historical intelligence analysis. Engineers review this text before approving dispatch.
+
+  **Example:** `"Reduce WOB from 18 klbs to 12 klbs immediately. Pump 40bbl HiVis sweep at 6 bpm. If torque does not reduce within 15 minutes, back-ream 300m and circulate bottoms-up before drilling ahead."`
+</ParamField>
+
+### Queue Request
+
+```bash
+curl -X POST http://localhost:8000/api/mitigation/queue \
+  -H "Content-Type: application/json" \
+  -d '{
+    "well_id": "OIL-4412",
+    "hazard_type": "Stuck Pipe",
+    "ai_mitigation_plan": "Reduce WOB from 18 klbs to 12 klbs immediately. Pump 40bbl HiVis sweep at 6 bpm. If torque does not reduce within 15 minutes, back-ream 300m and circulate bottoms-up before drilling ahead."
+  }'
+```
+
+### Queue Response
+
+<ResponseField name="status" type="string">
+  Always `"queued"` on success.
+</ResponseField>
+
+<ResponseField name="queue_id" type="string">
+  Unique identifier for this mitigation plan, formatted as `Q-{unix_timestamp}`.
+
+  **Example:** `"Q-1731570125"`
+</ResponseField>
+
+```json
+{
+  "status": "queued",
+  "queue_id": "Q-1731570125"
+}
+```
+
+## GET /api/mitigation/pending
+
+Returns all mitigation plans currently in `PENDING_REVIEW` state. Use this endpoint to populate the engineer's review dashboard.
+
+### Pending Request
+
+```bash
+curl http://localhost:8000/api/mitigation/pending
+```
+
+### Pending Response
+
+<ResponseField name="pending_count" type="integer">
+  Total number of items currently awaiting engineer review.
+</ResponseField>
+
+<ResponseField name="items" type="object">
+  A dictionary keyed by `queue_id`. Each value is a mitigation plan object with `well_id`, `hazard_type`, `ai_mitigation_plan`, and `status` fields.
+</ResponseField>
+
+```json
+{
+  "pending_count": 2,
+  "items": {
+    "Q-1731570125": {
+      "well_id": "OIL-4412",
+      "hazard_type": "Stuck Pipe",
+      "ai_mitigation_plan": "Reduce WOB from 18 klbs to 12 klbs immediately. Pump 40bbl HiVis sweep at 6 bpm. If torque does not reduce within 15 minutes, back-ream 300m and circulate bottoms-up before drilling ahead.",
+      "status": "PENDING_REVIEW"
+    },
+    "Q-1731570298": {
+      "well_id": "OIL-3870",
+      "hazard_type": "Mud Loss",
+      "ai_mitigation_plan": "Stop drilling. Pump 50bbl LCM pill (coarse nut plug + graphite). Reduce mud weight by 0.02 sg. Monitor returns for 30 minutes before resuming circulation.",
+      "status": "PENDING_REVIEW"
+    }
+  }
+}
+```
+
+## POST /api/mitigation/approve/{queue_id}
+
+Approves a pending mitigation plan and marks it for dispatch to the active rig. The plan's `status` transitions from `PENDING_REVIEW` to `APPROVED`. A log entry is written to the server confirming the engineer's approval.
+
+<ParamField path="queue_id" type="string" required>
+  The unique queue identifier returned by `POST /api/mitigation/queue`. Must match a key in the current mitigation queue.
+
+  **Example:** `Q-1731570125`
+</ParamField>
+
+### Approve Request
+
+```bash
+curl -X POST http://localhost:8000/api/mitigation/approve/Q-1731570125
+```
+
+### Approve Response
+
+<ResponseField name="status" type="string">
+  `"success"` if the queue ID exists and was approved. `"error"` if the queue ID was not found.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Confirmation string: `"Mitigation {queue_id} dispatched to Rig."` on success, or `"Queue ID not found."` on error.
+</ResponseField>
+
+```json
+{
+  "status": "success",
+  "message": "Mitigation Q-1731570125 dispatched to Rig."
+}
+```
+
+```json
+{
+  "status": "error",
+  "message": "Queue ID not found."
+}
+```
+
+## Queue Item States
+
+| State | Description | Triggered by |
+|-------|-------------|-------------|
+| `PENDING_REVIEW` | AI plan submitted, awaiting engineer review | `POST /api/mitigation/queue` |
+| `APPROVED` | Engineer approved; plan dispatched to rig | `POST /api/mitigation/approve/{queue_id}` |
+
+<Note>
+  The current implementation uses an **in-memory Python dictionary** (`mitigation_queue = {}`) as the queue store. All queued items are lost on server restart. Production deployments should persist mitigation plans in the `mitigation_workflows` database table introduced in the Round 2 SQL schema upgrades. The table structure mirrors the queue item fields: `queue_id`, `well_id`, `hazard_type`, `ai_mitigation_plan`, `status`, and a `created_at` timestamp.
+</Note>

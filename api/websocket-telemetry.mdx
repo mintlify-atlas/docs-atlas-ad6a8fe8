@@ -1,0 +1,198 @@
+---
+title: "WS /ws/telemetry/{well_id} — Real-Time Telemetry WebSocket"
+sidebarTitle: "WS /ws/telemetry"
+description: "Real-time bidirectional WebSocket stream for live drilling telemetry. The server applies the physics engine on every tick to detect Mechanical Specific Energy anomalies and Stick-Slip vibrations."
+---
+
+`WS /ws/telemetry/{well_id}` is a persistent WebSocket connection that enables real-time, bidirectional drilling data exchange between the rig's data acquisition system and the NWIS backend. The client sends individual telemetry frames as JSON text, and the server responds on every tick with a live physics analysis computed by `calculate_mse_and_stick_slip()`. The server maintains a rolling window of the last 10 telemetry ticks per well and uses it to detect Stick-Slip vibrations — one of the leading causes of drill string twist-off.
+
+## Connection
+
+**WebSocket URL:**
+
+```
+ws://localhost:8000/ws/telemetry/{well_id}
+```
+
+<ParamField path="well_id" type="string" required>
+  Unique identifier for the well or rig session. Used to maintain an isolated rolling telemetry history. The server creates a separate 10-tick buffer for each unique `well_id`.
+
+  **Example:** `OIL-4412`, `RIG-7`, `DULIAJAN-SECTOR4-WELL3`
+</ParamField>
+
+## Sending Telemetry Frames
+
+After connecting, the client sends telemetry frames as **JSON text messages**. Each frame represents one sensor reading at a point in time. The physics engine requires at least 5 frames before it can return meaningful stick-slip analysis.
+
+### Telemetry Frame Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `torque` | float | Surface torque in ft-lbs at this tick |
+| `rpm` | float | Rotary speed in RPM at this tick |
+| `rop` | float | Rate of Penetration in m/hr at this tick |
+| `wob` | float | Weight on Bit in klbs at this tick |
+| `depth` | float | Current bit depth in metres |
+
+### Example Telemetry Frame
+
+```json
+{
+  "torque": 3850.0,
+  "rpm": 72.0,
+  "rop": 8.3,
+  "wob": 15.5,
+  "depth": 2783.0
+}
+```
+
+## Server Response
+
+The server sends a JSON response immediately after processing each incoming frame.
+
+<ResponseField name="status" type="string">
+  Always `"live"` while the connection is active.
+</ResponseField>
+
+<ResponseField name="physics" type="object">
+  The physics analysis object returned by `calculate_mse_and_stick_slip()` for the current rolling window.
+
+  <Expandable title="physics fields">
+    <ResponseField name="status" type="string">
+      `"success"` when the rolling window has 5 or more frames and analysis was completed. `"insufficient_data"` when fewer than 5 frames have been received since connecting (or since the last disconnect).
+    </ResponseField>
+    <ResponseField name="is_stick_slip" type="boolean">
+      `true` when a Stick-Slip vibration pattern has been detected in the current 10-tick window. Detection criteria: torque variance across the window exceeds **1500 ft-lbs** AND average RPM is below **80 RPM**.
+    </ResponseField>
+    <ResponseField name="torque_variance" type="float">
+      The range of torque values in the current window: `max(torques) - min(torques)`. Rounded to 2 decimal places.
+    </ResponseField>
+    <ResponseField name="avg_rpm" type="float">
+      Mean RPM across all ticks in the current window. Rounded to 2 decimal places.
+    </ResponseField>
+    <ResponseField name="warning" type="string or null">
+      A warning message string when `is_stick_slip` is `true`: `"CRITICAL: High Stick-Slip Vibration Detected. Severe risk of drill string twist-off."` `null` when no stick-slip is detected.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Response — Insufficient Data (first 4 frames)
+
+```json
+{
+  "status": "live",
+  "physics": {
+    "status": "insufficient_data",
+    "is_stick_slip": false
+  }
+}
+```
+
+### Response — Normal Operations
+
+```json
+{
+  "status": "live",
+  "physics": {
+    "status": "success",
+    "is_stick_slip": false,
+    "torque_variance": 342.5,
+    "avg_rpm": 108.4,
+    "warning": null
+  }
+}
+```
+
+### Response — Stick-Slip Detected
+
+```json
+{
+  "status": "live",
+  "physics": {
+    "status": "success",
+    "is_stick_slip": true,
+    "torque_variance": 2180.0,
+    "avg_rpm": 63.2,
+    "warning": "CRITICAL: High Stick-Slip Vibration Detected. Severe risk of drill string twist-off."
+  }
+}
+```
+
+## Stick-Slip Detection Logic
+
+The physics engine analyses the **last 10 telemetry ticks** in the rolling window on every received frame. The detection algorithm checks two simultaneous conditions:
+
+| Condition | Threshold | Significance |
+|-----------|-----------|-------------|
+| Torque variance | `> 1500 ft-lbs` | Indicates violent oscillation of the drill string |
+| Average RPM | `< 80 RPM` | Low surface RPM indicates the bit is intermittently stopping (sticking) |
+
+Both conditions must be true simultaneously for `is_stick_slip` to be set to `true`. This combination is the classic signature of Stick-Slip vibration, where the bit momentarily sticks against the formation and then releases suddenly, causing a reactive torque spike at surface.
+
+## JavaScript Client Example
+
+```javascript
+const wellId = "OIL-4412";
+const ws = new WebSocket(`ws://localhost:8000/ws/telemetry/${wellId}`);
+
+ws.onopen = () => {
+  console.log(`Connected to NWIS telemetry stream for ${wellId}`);
+};
+
+// Send a telemetry tick every second
+const interval = setInterval(() => {
+  const frame = {
+    torque: 3200 + Math.random() * 2000, // simulate torque variance
+    rpm: 60 + Math.random() * 40,
+    rop: 10.0,
+    wob: 15.0,
+    depth: 2780.0
+  };
+  ws.send(JSON.stringify(frame));
+}, 1000);
+
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log("Physics Analysis:", data.physics);
+  if (data.physics.is_stick_slip) {
+    console.warn("⚠️", data.physics.warning);
+    // Trigger dashboard alert
+  }
+};
+
+ws.onclose = () => {
+  clearInterval(interval);
+  console.log("Disconnected from telemetry stream.");
+};
+```
+
+## Python Client Example
+
+```python
+import asyncio
+import json
+import websockets
+
+async def stream_telemetry(well_id: str):
+    uri = f"ws://localhost:8000/ws/telemetry/{well_id}"
+    async with websockets.connect(uri) as ws:
+        for i in range(20):
+            frame = {
+                "torque": 3500.0 + (i * 200),
+                "rpm": 75.0 - (i * 2),
+                "rop": 9.5,
+                "wob": 16.0,
+                "depth": 2780.0 + i
+            }
+            await ws.send(json.dumps(frame))
+            response = json.loads(await ws.recv())
+            print(f"Tick {i+1}: is_stick_slip={response['physics'].get('is_stick_slip')}, "
+                  f"torque_variance={response['physics'].get('torque_variance')}")
+            await asyncio.sleep(1)
+
+asyncio.run(stream_telemetry("OIL-4412"))
+```
+
+<Note>
+  The rolling window is initialised fresh on each new WebSocket connection. If a rig temporarily disconnects and reconnects, the buffer resets and the first 4 frames will return `"insufficient_data"`. The server logs a disconnect event at the `INFO` level: `"Rig {well_id} disconnected from WebSocket."`. Each `well_id` maintains its own independent telemetry history, so multiple rigs can stream simultaneously without interference.
+</Note>

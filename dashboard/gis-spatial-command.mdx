@@ -1,0 +1,168 @@
+---
+title: "GIS Spatial Command: Interactive Offset Well Map"
+sidebarTitle: "GIS Map"
+description: "The GIS Spatial Command tab renders an interactive Folium map showing the active rig, nearby offset wells color-coded by incident type, and a search radius circle."
+---
+
+The **GIS Spatial Command** tab is the primary situational awareness screen in the NWIS dashboard. It renders a georeferenced map of the active drilling rig and every retrieved offset well within the configured search radius and depth corridor, with each well marker color-coded by its historical incident type. Alongside the map, a ranked **Top Analog Offset Matches** panel surfaces the four most similar offset wells with their full engineering metadata, giving drillers an immediate spatial and geological risk picture without leaving the main view.
+
+---
+
+## Map Layout
+
+The tab renders a two-column layout with a width ratio of **1.7 : 1.0** (map left, panel right), created with:
+
+```python
+map_col, right_col = st.columns([1.7, 1.0], gap="medium")
+```
+
+The map renders at a fixed height of **530 px** and expands to fill its container width. A map engine selector radio button above the map lets operators switch between two rendering backends:
+
+| Option | Engine | Description |
+|---|---|---|
+| `[MAP] Seamless Dark Map (Auto-Zoom)` | **PyDeck / Deck.gl** | Hardware-accelerated WebGL ScatterplotLayer on a Carto Dark basemap. Auto-zooms to tightly fit the search radius. Recommended for live simulation — eliminates iframe blackouts. |
+| `[SAT] Leaflet Satellite` | **Folium / Leaflet** | ESRI World Imagery satellite basemap with full `LayerControl` and `Fullscreen` plugin support. Best for geological context and feature inspection. |
+
+Both engines share the same data source: `nearby_wells` from `st.session_state["dashboard_data"]` and the active rig record from `default_active_well`.
+
+---
+
+## Map Markers
+
+All offset well markers are color-coded by their `event_type` field. The color scheme is consistent across the map, the analog panel cards, and the trend charts.
+
+| `event_type` Value | Marker Color | Hex Code |
+|---|---|---|
+| `Stuck Pipe` | Red | `#ef4444` |
+| `Mud Loss` | Orange | `#f97316` |
+| `Torque Spike` | Yellow | `#eab308` |
+| `None` / Normal | Green | `#22c55e` |
+| Active rig | Cyan/Blue | `#38bdf8` / `#0ea5e9` |
+
+In the **Folium** engine, offset wells are rendered as `CircleMarker` elements with radius 6, white border, and 0.9 fill opacity. The active rig uses a distinct `CircleMarker` with radius 8 and cyan fill. A blue `Circle` overlay (color `#2563eb`, 5% fill opacity) draws the configured search radius perimeter around the rig. A fixed legend in the bottom-left corner of the map explains the color coding.
+
+In the **PyDeck** engine, offset wells are `ScatterplotLayer` points with radius 130 m and a white 1.5 px border. The rig is a separate small cyan scatter point. The search radius renders as a large filled circle with 7% opacity. The zoom level is computed dynamically:
+
+```python
+_pdk_zoom = max(4.0, min(15.5, 14.9 - math.log2(max(radius_km, 0.1))))
+```
+
+This formula ensures the radius circle always fits within the 530 px viewport regardless of the configured buffer size.
+
+Hovering over any offset well marker in PyDeck shows a tooltip with: well name, well ID, distance (km), analog match percentage, formation zone, incident type, and incident depth.
+
+<Note>
+The Folium engine renders a maximum of 50 wells (sorted by similarity, descending) to prevent DOM lag. The PyDeck engine has no such hard cap but is recommended for high-well-count scenarios due to its WebGL rendering path.
+</Note>
+
+---
+
+## Top Analog Offset Matches Panel
+
+The right column of the GIS tab displays a **Top Analog Offset Matches** section header followed by up to 4 well cards, sorted by `similarity` score descending:
+
+```python
+top_analogs = sorted(
+    nearby_wells,
+    key=lambda item: item.get("similarity", 0),
+    reverse=True,
+)[:4]
+```
+
+Each card shows:
+
+- **Well name** and **well_id** in the card header (e.g. `Well Y (Y-16)`)
+- **Match % badge** — the similarity score rendered as `{score:.0f}% Match` in a cyan badge
+- **Distance** in km and **formation zone** (`formation_at_2780`) on the first detail line
+- **Historical Event** type with its incident color, and event measured depth in metres (e.g. `Stuck Pipe @ 2800 m`)
+- **Event note** — a quoted engineering remark from the well record (e.g. `"Classic stuck-pipe analog"`)
+
+If no offset wells are returned for the current search parameters, the panel displays an info message:
+
+```
+ℹ️ No offset wells found in this search radius and depth corridor.
+   Try increasing the buffer radius.
+```
+
+---
+
+## Offset Well Data Fields
+
+The `offset_wells_map_data` array (stored in `historical_context` within `st.session_state["dashboard_data"]`) contains one record per nearby offset well. Each record includes the following fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `well_id` | `str` | Unique well identifier, e.g. `Y-16`, `A-17` |
+| `name` | `str` | Human-readable well name, e.g. `Well Y` |
+| `lat` | `float` | WGS-84 latitude of the wellhead |
+| `lon` | `float` | WGS-84 longitude of the wellhead |
+| `distance_km` | `float` | Haversine distance from the active rig to this well (km), rounded to 2 decimal places |
+| `similarity` | `float` | Analog similarity score (0–100 %), computed from distance, formation match, and depth proximity |
+| `event_type` | `str` | Historical incident classification: `"Stuck Pipe"`, `"Mud Loss"`, `"Torque Spike"`, or `"None"` |
+| `event_md` | `float \| None` | Measured depth (m) at which the historical incident occurred |
+| `formation_at_2780` | `str` | Geological formation logged at 2,780 m depth for this well |
+| `event_note` | `str` | Free-text engineering remark describing the incident context |
+
+The `distance_km` field is calculated by the `haversine_km()` function in `gis_engine.py` using the standard Haversine formula with Earth radius 6,371 km.
+
+---
+
+## Sorting Logic
+
+Before rendering either the map or the analog panel, offset wells are ranked by a composite hazard-severity-first, similarity-second sort. The **hazard severity** weight assigned to each incident type is:
+
+| `event_type` | Hazard Severity Weight |
+|---|---|
+| `Stuck Pipe` | 3 (highest) |
+| `Mud Loss` | 2 |
+| `Torque Spike` | 1 |
+| `None` | 0 |
+
+The similarity score is calculated by `calculate_similarity()` in `gis_engine.py` using three additive components:
+
+```python
+# Distance contribution (max 40 pts)
+if distance_km <= 2:   score += 40
+elif distance_km <= 5: score += 25
+else:                   score += 10
+
+# Formation match (max 30 pts)
+if well["formation_at_2780"] == active_formation:
+    score += 30
+
+# Depth proximity (max 30 pts)
+if abs(event_md - current_depth) <= depth_window:
+    score += 30
+```
+
+The maximum possible similarity score is **100**. This scoring means wells drilled in the same formation, within 2 km, at a similar depth will always rank highest regardless of incident severity. The hazard severity sort in Tab 1 is applied on top so that, among equally similar wells, stuck-pipe hazards surface first in the analog panel.
+
+---
+
+## Exporting Data
+
+The **Offset Records & Deep-Dive** tab (Tab 2) provides a CSV export of the full corridor offset well table. Clicking the **Export Well Records (CSV)** button calls `generate_handover_report_df()` from `data_source.py`, which formats the offset well records into a structured shift handover report with the following columns:
+
+| Column | Source Field |
+|---|---|
+| Well ID | `well_id` |
+| Well Name | `name` |
+| Field | `field` |
+| Distance (km) | `distance_km` |
+| Formation Zone | `formation_at_2780` |
+| Historical Incident | `event_type` |
+| Incident Depth (m) | `event_md` |
+| Analog Match (%) | `similarity` |
+| Field Note / Remarks | `event_note` |
+
+The filename is auto-generated as:
+
+```
+nwis_offset_wells_{active_well_name}_{bit_depth}m.csv
+```
+
+For example: `nwis_offset_wells_DLJ-47A_2780m.csv`
+
+<Tip>
+Export the handover CSV at the end of each shift and attach it to the Daily Drilling Report (DDR). The structured analog match data provides toolpushers and relief crews with a pre-computed risk corridor baseline, eliminating the need to re-run the analysis from scratch during handover.
+</Tip>

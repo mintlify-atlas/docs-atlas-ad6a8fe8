@@ -1,0 +1,342 @@
+---
+title: "GeoMine PostgreSQL Database Schema Reference"
+sidebarTitle: "Database Schema"
+description: "Reference for all PostgreSQL tables in nwis_wells_db: historical_drilling_events, underground_infrastructure, rag_embeddings, ocr_corrections, mitigation_workflows, and npt data."
+---
+
+GeoMine stores all drilling intelligence in a single PostgreSQL database named `nwis_wells_db`. The schema is built incrementally across four SQL initialisation files that PostgreSQL executes in order when the `geomine_db` container boots for the first time. The database relies on two extensions — PostGIS for geospatial indexing of well coordinates and pgvector for vector-similarity search across drilling event embeddings.
+
+## PostGIS Extension
+
+The very first line of `historical_drilling_events.sql` (mounted as `01_init.sql`) enables the PostGIS extension:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS postgis;
+```
+
+PostGIS adds a `geometry` column type used throughout the schema. The `historical_drilling_events` table stores well locations as `geometry(Point, 4326)` — a 2-D point in SRID 4326 (WGS84), the standard GPS coordinate reference system used worldwide. This means every latitude/longitude pair is also queryable with full PostGIS spatial operators (`ST_DWithin`, `ST_Distance`, `ST_Within`, etc.) for proximity-based risk analysis.
+
+<Note>
+  SRID 4326 corresponds to the WGS84 datum — the same coordinate system used by GPS receivers and most mapping APIs (Google Maps, Leaflet, Mapbox). Latitude and longitude values stored in `historical_drilling_events` are always in decimal degrees relative to WGS84.
+</Note>
+
+## SQL Initialisation Order
+
+The four files are executed in alphabetical order by PostgreSQL's `docker-entrypoint-initdb.d` mechanism. Each file builds on the previous one:
+
+<Steps>
+  <Step title="01_init.sql — Core schema and seed data">
+    Source: `historical_drilling_events.sql`
+
+    Creates the `postgis` extension, the `historical_drilling_events` table, its auto-increment sequence, the primary key constraint, and inserts 100 seed drilling event rows. Also appends the Round 2 `ALTER TABLE` statements (`cause`, `mitigation`, `outcome`, `npt_duration_minutes`, `npt_category`) to guarantee they run even if `02_upgrade.sql` is not present.
+  </Step>
+  <Step title="02_upgrade.sql — NPT and analytics columns">
+    Source: `02_round2_upgrades.sql`
+
+    Idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` statements that add cause/mitigation/outcome text fields and the NPT (Non-Productive Time) financial engine columns to `historical_drilling_events`.
+  </Step>
+  <Step title="03_rag_embeddings.sql — Vector search infrastructure">
+    Source: `rag/03_rag_embeddings.sql`
+
+    Enables the `vector` extension (pgvector) and creates the `historical_event_embeddings` table for storing high-dimensional embeddings alongside event metadata.
+  </Step>
+  <Step title="04_ocr_schema_upgrades.sql — OCR pipeline tables and audit trail">
+    Source: `04_ocr_schema_upgrades.sql`
+
+    Relaxes NOT NULL constraints on `historical_drilling_events` to allow partial OCR extractions, adds audit columns (`source_file`, `file_hash`, `document_class`, `extraction_confidence`, `processed_at`), and creates three new tables: `underground_infrastructure`, `processed_files`, and `ocr_corrections`.
+  </Step>
+</Steps>
+
+---
+
+## historical_drilling_events
+
+The primary fact table. Every row is a single drilling event recorded at a specific well, depth, and geographic location. Seed data includes 100 real-format events across six well IDs in the Assam basin.
+
+```sql
+CREATE TABLE public.historical_drilling_events (
+    id                   INTEGER NOT NULL,
+    well_id              CHARACTER VARYING(50) NOT NULL,
+    latitude             DOUBLE PRECISION NOT NULL,
+    longitude            DOUBLE PRECISION NOT NULL,
+    geom                 public.geometry(Point, 4326),
+    event_depth          DOUBLE PRECISION NOT NULL,
+    event_type           CHARACTER VARYING(100) NOT NULL,
+    formation            CHARACTER VARYING(100) NOT NULL,
+    summary_text         TEXT
+);
+
+-- Round 2 columns (added by 02_upgrade.sql / appended to 01_init.sql)
+ALTER TABLE public.historical_drilling_events ADD COLUMN IF NOT EXISTS cause               TEXT DEFAULT '';
+ALTER TABLE public.historical_drilling_events ADD COLUMN IF NOT EXISTS mitigation          TEXT DEFAULT '';
+ALTER TABLE public.historical_drilling_events ADD COLUMN IF NOT EXISTS outcome             TEXT DEFAULT '';
+ALTER TABLE public.historical_drilling_events ADD COLUMN IF NOT EXISTS npt_duration_minutes INT DEFAULT 0;
+ALTER TABLE public.historical_drilling_events ADD COLUMN IF NOT EXISTS npt_category        VARCHAR(50) DEFAULT 'Unknown';
+```
+
+After `04_ocr_schema_upgrades.sql` runs, five additional audit columns are appended:
+
+```sql
+-- OCR audit columns (added by 04_ocr_schema_upgrades.sql)
+ALTER TABLE historical_drilling_events ADD COLUMN source_file            TEXT;
+ALTER TABLE historical_drilling_events ADD COLUMN file_hash              VARCHAR(64);
+ALTER TABLE historical_drilling_events ADD COLUMN document_class         VARCHAR(50);
+ALTER TABLE historical_drilling_events ADD COLUMN extraction_confidence  DOUBLE PRECISION;
+ALTER TABLE historical_drilling_events ADD COLUMN processed_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+```
+
+### Column Reference
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `INTEGER` (PK, auto-increment) | Surrogate primary key. Sequence starts at 1, seed data uses IDs 1–100. |
+| `well_id` | `VARCHAR(50)` | Well identifier string, e.g. `OIL-MKM-12`, `OIL-DGB-204`. May be NULL for OCR-sourced partial records. |
+| `latitude` | `DOUBLE PRECISION` | Decimal degrees latitude (WGS84). May be NULL for OCR-sourced partial records. |
+| `longitude` | `DOUBLE PRECISION` | Decimal degrees longitude (WGS84). May be NULL for OCR-sourced partial records. |
+| `geom` | `geometry(Point, 4326)` | PostGIS 2-D point geometry derived from latitude/longitude. Populated by trigger. Enables spatial queries. |
+| `event_depth` | `DOUBLE PRECISION` | Measured depth at which the event occurred, in metres. May be NULL for OCR-sourced partial records. |
+| `event_type` | `VARCHAR(100)` | Drilling event classification. Observed values: `Stuck Pipe Incident`, `Severe Mud Loss`, `Gas Kick`, `Shale Instability`, `High Torque`, `Normal Operation`. |
+| `formation` | `VARCHAR(100)` | Geological formation name. Observed values: `Kopili Shale`, `Barail Coal-Shale`, `Lakadong-Therria`, `Girujan Clay`, `Tipam Sandstone`. |
+| `summary_text` | `TEXT` | Human-readable narrative of the event. Used as the primary source text for RAG embedding generation. |
+| `cause` | `TEXT` | Root-cause analysis text (empty string by default; populated by analysis pipeline). |
+| `mitigation` | `TEXT` | Mitigation action taken or recommended. |
+| `outcome` | `TEXT` | Recorded outcome of the event. |
+| `npt_duration_minutes` | `INTEGER` | Non-productive time in minutes attributed to this event. Default `0`. |
+| `npt_category` | `VARCHAR(50)` | NPT classification category (e.g., `Mechanical`, `Geological`). Default `'Unknown'`. |
+| `source_file` | `TEXT` | Filename of the OCR-processed document that produced this record. |
+| `file_hash` | `VARCHAR(64)` | SHA-256 hash of the source document for duplicate detection. |
+| `document_class` | `VARCHAR(50)` | OCR pipeline classification of the source document type. |
+| `extraction_confidence` | `DOUBLE PRECISION` | Confidence score (0.0–1.0) assigned by the OCR extraction pipeline. |
+| `processed_at` | `TIMESTAMP` | Timestamp when the OCR pipeline inserted or updated this row. |
+
+---
+
+## underground_infrastructure
+
+Created by `04_ocr_schema_upgrades.sql`. Stores subsurface infrastructure objects — aquifers, pipelines, and other features — extracted from OCR-processed documents. This table feeds the collision-risk layer of the GeoMine spatial analysis.
+
+```sql
+CREATE TABLE IF NOT EXISTS underground_infrastructure (
+    id                      SERIAL PRIMARY KEY,
+    infra_id                VARCHAR(100),
+    latitude                DOUBLE PRECISION,
+    longitude               DOUBLE PRECISION,
+    depth_m                 DOUBLE PRECISION,
+    infra_type              VARCHAR(100),
+    source_file             TEXT,
+    file_hash               VARCHAR(64),
+    document_class          VARCHAR(50),
+    extraction_confidence   DOUBLE PRECISION,
+    processed_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Column Reference
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `SERIAL` (PK) | Auto-increment surrogate key. |
+| `infra_id` | `VARCHAR(100)` | External identifier for the infrastructure feature (e.g., pipeline segment ID). |
+| `latitude` | `DOUBLE PRECISION` | Decimal degrees latitude of the infrastructure feature. |
+| `longitude` | `DOUBLE PRECISION` | Decimal degrees longitude of the infrastructure feature. |
+| `depth_m` | `DOUBLE PRECISION` | Depth of the feature below surface, in metres. |
+| `infra_type` | `VARCHAR(100)` | Type of infrastructure. Expected values include `Aquifer` and `Pipeline`. |
+| `source_file` | `TEXT` | Source document filename from the OCR pipeline. |
+| `file_hash` | `VARCHAR(64)` | Document hash for deduplication. |
+| `document_class` | `VARCHAR(50)` | OCR document classification. |
+| `extraction_confidence` | `DOUBLE PRECISION` | OCR confidence score for this extraction. |
+| `processed_at` | `TIMESTAMP` | Insertion timestamp. |
+
+---
+
+## historical_event_embeddings
+
+Created by `rag/03_rag_embeddings.sql`. Stores vector embeddings of drilling event narratives for semantic similarity search (RAG). Requires the `vector` (pgvector) extension which is installed in `Dockerfile.db` via the `postgresql-15-pgvector` package.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS historical_event_embeddings (
+    id              BIGSERIAL PRIMARY KEY,
+    event_id        BIGINT NOT NULL,
+    content         TEXT NOT NULL,
+    -- Dimension is not hard-coded; use VECTOR(768) for Gemini text-embedding-004
+    embedding       VECTOR,
+    well_id         TEXT,
+    depth_m         DOUBLE PRECISION,
+    formation       TEXT,
+    event_type      TEXT,
+    report_id       TEXT,
+    document_type   TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Column Reference
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `BIGSERIAL` (PK) | Auto-increment surrogate key. |
+| `event_id` | `BIGINT` | Foreign reference to `historical_drilling_events.id` (not enforced by FK constraint). |
+| `content` | `TEXT` | The raw text that was embedded — typically `summary_text` from the parent event. |
+| `embedding` | `VECTOR` | High-dimensional float vector. Schema uses an untyped `VECTOR`; for Gemini `text-embedding-004` set this to `VECTOR(768)`. For `in_memory` mode the cached embeddings are 3072-dimensional. |
+| `well_id` | `TEXT` | Denormalized well identifier for fast filtering without a join. |
+| `depth_m` | `DOUBLE PRECISION` | Denormalized event depth. |
+| `formation` | `TEXT` | Denormalized formation name. |
+| `event_type` | `TEXT` | Denormalized event type. |
+| `report_id` | `TEXT` | ID of the source drilling report, if applicable. |
+| `document_type` | `TEXT` | Source document type (e.g., `daily_drilling_report`). |
+| `created_at` | `TIMESTAMP` | Insertion timestamp. |
+
+<Tip>
+  To create an IVFFlat or HNSW index for fast approximate nearest-neighbour search once you have populated the table, you must first fix the vector dimension. Alter the column to `VECTOR(768)` (or your chosen dimension), then run `CREATE INDEX ON historical_event_embeddings USING ivfflat (embedding vector_cosine_ops)`.
+</Tip>
+
+---
+
+## ocr_corrections
+
+Created by `04_ocr_schema_upgrades.sql`. Provides an audit and feedback-loop table for the enterprise OCR pipeline. When a user corrects an OCR extraction through the GeoMine UI, a row is inserted here capturing the before/after values, enabling model retraining and quality reporting.
+
+```sql
+CREATE TABLE IF NOT EXISTS ocr_corrections (
+    id              SERIAL PRIMARY KEY,
+    record_type     VARCHAR(30) NOT NULL,   -- 'drilling_event' or 'infrastructure'
+    record_id       INTEGER NOT NULL,
+    field_name      VARCHAR(100) NOT NULL,
+    old_value       TEXT,
+    new_value       TEXT,
+    corrected_by    VARCHAR(100) DEFAULT 'user',
+    corrected_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Column Reference
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `SERIAL` (PK) | Auto-increment surrogate key. |
+| `record_type` | `VARCHAR(30)` | The table that owns the corrected record. Values: `'drilling_event'` or `'infrastructure'`. |
+| `record_id` | `INTEGER` | The `id` of the row in the referenced table that was corrected. |
+| `field_name` | `VARCHAR(100)` | The column name that was corrected (e.g., `'formation'`, `'event_type'`). |
+| `old_value` | `TEXT` | The incorrect value produced by OCR extraction. |
+| `new_value` | `TEXT` | The corrected value supplied by the user. |
+| `corrected_by` | `VARCHAR(100)` | Username or identifier of the person who made the correction. Default `'user'`. |
+| `corrected_at` | `TIMESTAMP` | Timestamp of the correction. |
+
+---
+
+## processed_files
+
+Created by `04_ocr_schema_upgrades.sql`. Tracks every document processed by the OCR ingestion pipeline. The `file_hash` unique constraint prevents the same document from being processed twice.
+
+```sql
+CREATE TABLE IF NOT EXISTS processed_files (
+    id                  SERIAL PRIMARY KEY,
+    file_name           TEXT NOT NULL,
+    file_hash           VARCHAR(64) NOT NULL UNIQUE,
+    file_size_bytes     BIGINT,
+    document_class      VARCHAR(50),
+    event_confidence    DOUBLE PRECISION,
+    infra_confidence    DOUBLE PRECISION,
+    status              VARCHAR(20) DEFAULT 'PROCESSED',
+    warnings            TEXT,
+    processed_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for fast duplicate lookups
+CREATE INDEX IF NOT EXISTS idx_processed_files_hash ON processed_files (file_hash);
+CREATE INDEX IF NOT EXISTS idx_hde_source_file ON historical_drilling_events (source_file);
+```
+
+---
+
+## Connecting to the Database
+
+### psql (command line)
+
+```bash
+# Connect from the host machine (Docker port-forwarded)
+psql -h 127.0.0.1 -p 5432 -U postgres -d nwis_wells_db
+
+# Connect from inside the running container
+docker exec -it geomine_db psql -U postgres -d nwis_wells_db
+
+# Quick table listing
+docker exec geomine_db psql -U postgres -d nwis_wells_db -c '\dt'
+
+# Row count check
+docker exec geomine_db psql -U postgres -d nwis_wells_db \
+  -c 'SELECT COUNT(*) FROM historical_drilling_events;'
+```
+
+### Python (psycopg2)
+
+```python
+import psycopg2
+
+conn = psycopg2.connect(
+    host="127.0.0.1",      # use "db" inside Docker network
+    port=5432,
+    user="postgres",
+    password="postgres",
+    dbname="nwis_wells_db"
+)
+
+cur = conn.cursor()
+cur.execute("""
+    SELECT well_id, event_type, formation, event_depth
+    FROM historical_drilling_events
+    WHERE event_type != 'Normal Operation'
+    ORDER BY event_depth DESC
+    LIMIT 10;
+""")
+rows = cur.fetchall()
+for row in rows:
+    print(row)
+
+cur.close()
+conn.close()
+```
+
+### Python (psycopg2) — PostGIS spatial query
+
+```python
+import psycopg2
+
+conn = psycopg2.connect(
+    host="127.0.0.1",
+    port=5432,
+    user="postgres",
+    password="postgres",
+    dbname="nwis_wells_db"
+)
+
+cur = conn.cursor()
+
+# Find all events within 10 km of a proposed drill site
+target_lat = 27.35
+target_lon = 95.45
+
+cur.execute("""
+    SELECT well_id, event_type, formation, event_depth,
+           ST_Distance(
+               geom::geography,
+               ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+           ) AS distance_m
+    FROM historical_drilling_events
+    WHERE ST_DWithin(
+        geom::geography,
+        ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+        10000   -- 10 km radius
+    )
+    ORDER BY distance_m;
+""", (target_lon, target_lat, target_lon, target_lat))
+
+nearby = cur.fetchall()
+for event in nearby:
+    print(event)
+
+cur.close()
+conn.close()
+```

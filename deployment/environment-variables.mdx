@@ -1,0 +1,109 @@
+---
+title: "GeoMine Environment Variables Reference"
+sidebarTitle: "Environment Variables"
+description: "Complete reference for all environment variables used by the GeoMine backend and dashboard, including database connection, Gemini API, and RAG backend configuration."
+---
+
+GeoMine's backend and dashboard are configured entirely through environment variables — no hard-coded secrets or host-specific paths. When deployed via Docker Compose, these variables are injected directly in `docker-compose.yml`. For local development, you can export them in your shell or place them in a `.env` file that `python-dotenv` picks up automatically.
+
+## Backend Environment Variables
+
+These variables are read by the FastAPI backend (`main:app`) at startup. In the Docker Compose deployment they are set under the `backend` service's `environment` block.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GEMINI_API_KEY` | *(none)* | Google Gemini API key. Required for live AI risk scoring, RAG queries, and Gemini-powered embeddings. Omit to run in offline mode. |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model name passed to the `google-genai` SDK. Swap for any available Gemini model variant without code changes. |
+| `RAG_BACKEND` | `in_memory` | RAG retrieval mode. Accepted values: `in_memory` (uses local JSON cache) or `pgvector` (queries the `historical_event_embeddings` table). See [RAG_BACKEND Modes](#rag_backend-modes) below. |
+| `DB_HOST` | `db` (Docker) / `127.0.0.1` (local) | PostgreSQL hostname. In Docker Compose this is the service name `db`; for local development use `127.0.0.1` or your database server's address. |
+| `DB_USER` | `postgres` | PostgreSQL username. |
+| `DB_PASSWORD` | `postgres` | PostgreSQL password. |
+| `DB_NAME` | `nwis_wells_db` | Target database name. Must match `POSTGRES_DB` set in the `db` service. |
+| `DB_PORT` | `5432` | PostgreSQL port. Change only if you expose the database on a non-standard port. |
+| `OLLAMA_URL` | `http://host.docker.internal:11434/api/generate` | Ollama API endpoint used for local LLM-powered OCR. The `host.docker.internal` alias resolves to the Docker host, so an Ollama instance running on your machine is reachable from inside the container without extra networking configuration. |
+
+## Dashboard Environment Variables
+
+These variables are read by the Streamlit dashboard (`nwis_dashboard/app.py`) and its configuration module (`nwis_dashboard/config.py`).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BACKEND_URL` | `http://backend:8000` (Docker) / `http://localhost:8000` (local) | Base URL of the FastAPI backend. The dashboard appends API paths such as `/api/analyze_risk` and `/api/dashboard/state` to this value. In Docker Compose the backend is reachable at `http://backend:8000` over the internal Docker network. |
+| `DATA_MODE` | `local` | Data sourcing mode for the dashboard. Accepted values: `local`, `csv`, or `postgres`. Controls how `config.py` fetches well records for display. |
+| `PG_HOST` | `db` | PostgreSQL host used by the dashboard's direct database connection (when `DATA_MODE=postgres`). |
+| `PG_PORT` | `5432` | PostgreSQL port for the dashboard's direct connection. |
+| `PG_DATABASE` | `nwis_wells_db` | Database name for the dashboard's direct connection. |
+| `PG_USER` | `postgres` | PostgreSQL username for the dashboard's direct connection. |
+| `PG_PASSWORD` | *(none)* | PostgreSQL password for the dashboard's direct connection. |
+| `CACHE_TTL_SECONDS` | `3600` | Duration in seconds that the dashboard caches data responses before re-fetching. |
+
+## Creating the .env File
+
+For local development, create a `.env` file in the project root. Both `python-dotenv` (backend) and the dashboard's `config.py` load this file automatically.
+
+```ini
+# .env — local development configuration
+# Do NOT commit this file to source control
+
+# --- Gemini AI ---
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-2.5-flash-lite
+
+# --- RAG Backend ---
+RAG_BACKEND=in_memory
+
+# --- PostgreSQL (local) ---
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_USER=postgres
+DB_PASSWORD=postgres
+DB_NAME=nwis_wells_db
+
+# --- Ollama (local LLM OCR) ---
+OLLAMA_URL=http://localhost:11434/api/generate
+
+# --- Dashboard ---
+BACKEND_URL=http://localhost:8000
+DATA_MODE=local
+```
+
+<Note>
+  GeoMine runs fully offline without a `GEMINI_API_KEY`. The ML-based drilling risk scoring engine, mock intelligence responses, and cached RAG embeddings all function without network access. Only live Gemini API calls (real-time LLM responses and fresh embedding generation) are disabled.
+</Note>
+
+## RAG_BACKEND Modes
+
+The `RAG_BACKEND` variable controls how the Retrieval-Augmented Generation pipeline retrieves similar historical drilling events to augment AI risk analysis.
+
+<CardGroup cols={2}>
+  <Card title="in_memory" icon="bolt">
+    **Default mode — works fully offline.**
+
+    Loads pre-computed embeddings from `nwis_mock_embeddings_cache.json` at startup. No pgvector extension is required, and no database queries are made during retrieval.
+
+    - Embedding dimensions: 3072 (Gemini `text-embedding-004` format stored in cache)
+    - Best for: development, demos, offline environments, and single-user deployments
+    - Limitation: the cache is static; new events added to the database are not automatically indexed
+  </Card>
+  <Card title="pgvector" icon="database">
+    **Production mode — requires pgvector.**
+
+    Queries the `historical_event_embeddings` table in `nwis_wells_db` using PostgreSQL's vector similarity operators provided by the `pgvector` extension (pre-installed in `Dockerfile.db`).
+
+    - Embedding dimensions: configurable (default `VECTOR` without fixed size in schema; set to `VECTOR(768)` for Gemini `text-embedding-004`)
+    - Best for: large datasets, multi-user deployments, and pipelines that continuously ingest new drilling reports
+    - Requirement: `GEMINI_API_KEY` must be set to generate embeddings at query time
+  </Card>
+</CardGroup>
+
+| Feature | `in_memory` | `pgvector` |
+|---------|-------------|------------|
+| Requires pgvector extension | No | Yes |
+| Works without `GEMINI_API_KEY` | ✅ Yes | ❌ No (for query-time embeddings) |
+| Scales to large event datasets | Limited by JSON file size | ✅ Yes |
+| Auto-indexes new events | ❌ No | ✅ Yes (via ingestion pipeline) |
+| Cold start time | Fast (in-process load) | Fast (DB connection) |
+
+<Warning>
+  Never commit real API keys or database passwords to source control. Add `.env` to your `.gitignore` before your first commit. For production deployments, use Docker secrets, AWS Secrets Manager, HashiCorp Vault, or your cloud provider's secret management service to inject sensitive variables at runtime.
+</Warning>

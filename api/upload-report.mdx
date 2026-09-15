@@ -1,0 +1,148 @@
+---
+title: "POST /api/upload_report — Enterprise OCR File Upload"
+sidebarTitle: "POST /upload_report"
+description: "Upload PDF, DOCX, XLSX, or image drilling reports for automatic OCR text extraction, LLM classification, and optional database insertion via the enterprise OCR pipeline."
+---
+
+`POST /api/upload_report` is the binary file ingestion endpoint for the NWIS enterprise OCR pipeline. Engineers upload scanned PDFs, DOCX well reports, XLSX data sheets, or raw images, and the pipeline automatically extracts text, classifies the document type, parses structured drilling-event and infrastructure fields, scores extraction confidence, and optionally inserts the parsed records directly into the PostgreSQL database. The endpoint also supports a correction feedback loop via `PATCH /api/ocr_correction` for resolving extraction errors after the fact.
+
+## Request
+
+`POST /api/upload_report`
+
+This endpoint accepts `multipart/form-data`. It does **not** accept `application/json`.
+
+<ParamField body="file" type="file" required>
+  The report file to be processed. The original filename is preserved through the pipeline for audit trail purposes. Supported formats are listed below.
+</ParamField>
+
+<ParamField query="insert" type="boolean" default="false">
+  When `true`, the extracted drilling event and infrastructure records are written to the PostgreSQL database (`historical_drilling_events` and `underground_infrastructure` tables). When `false` (the default), the pipeline runs in dry-run mode: the full extraction result is returned but nothing is persisted. Pass as a query parameter: `?insert=true`.
+</ParamField>
+
+## Supported File Types
+
+| Format | Extension(s) | Notes |
+|--------|-------------|-------|
+| PDF | `.pdf` | Scanned or digitally-born; full-page OCR applied |
+| Word Document | `.docx` | Text extracted from paragraphs and tables |
+| Excel Spreadsheet | `.xlsx` | Sheet data extracted and flattened |
+| Images | `.jpg`, `.jpeg`, `.png`, `.tiff` | Direct OCR on raster images |
+
+## Response
+
+<ResponseField name="status" type="string">
+  Pipeline execution status. `"success"` on clean extraction. May be `"PARTIAL"` if warnings were raised. `"error"` if the pipeline failed entirely.
+</ResponseField>
+
+<ResponseField name="document_class" type="string">
+  LLM-assigned document classification. For example: `"Drilling Event Report"`, `"Infrastructure Survey"`, `"Daily Drilling Report"`.
+</ResponseField>
+
+<ResponseField name="drilling_event" type="object">
+  Structured drilling event fields extracted by the OCR pipeline (mirrors the `IngestPayload` extraction schema: `well_id`, `depth_m`, `formation`, `event_type`, `cause`, `mitigation`, `outcome`). `null` if no drilling event was identified.
+</ResponseField>
+
+<ResponseField name="infrastructure" type="object">
+  Structured underground infrastructure fields extracted by the pipeline (e.g., pipeline type, depth, material, operator). `null` if no infrastructure data was identified.
+</ResponseField>
+
+<ResponseField name="event_confidence" type="float">
+  Confidence score (0.0–1.0) for the `drilling_event` extraction. Scores below 0.6 typically indicate ambiguous or incomplete source text.
+</ResponseField>
+
+<ResponseField name="infra_confidence" type="float">
+  Confidence score (0.0–1.0) for the `infrastructure` extraction.
+</ResponseField>
+
+<ResponseField name="warnings" type="array">
+  List of non-fatal warning strings raised during extraction (e.g., missing fields, low-quality scan, ambiguous event type). Empty array if no warnings were raised.
+</ResponseField>
+
+<ResponseField name="db_event_id" type="integer or null">
+  The inserted row ID for the drilling event record in `historical_drilling_events`. `null` when `insert=false` or when no drilling event was found.
+</ResponseField>
+
+<ResponseField name="db_infra_id" type="integer or null">
+  The inserted row ID for the infrastructure record in `underground_infrastructure`. `null` when `insert=false` or when no infrastructure data was found.
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST "http://localhost:8000/api/upload_report?insert=true" \
+  -F "file=@/path/to/report.pdf"
+```
+
+### Example Response
+
+```json
+{
+  "status": "success",
+  "document_class": "Drilling Event Report",
+  "drilling_event": {
+    "well_id": "OIL-6102",
+    "depth_m": 3150.0,
+    "formation": "Barail Formation",
+    "event_type": "Mud Loss",
+    "cause": "Natural fracture zone encountered at 3150m",
+    "mitigation": "Pumped two LCM pills, reduced pump pressure",
+    "outcome": "Partial returns restored after 14 hours"
+  },
+  "infrastructure": null,
+  "event_confidence": 0.87,
+  "infra_confidence": 0.0,
+  "warnings": [],
+  "db_event_id": 152,
+  "db_infra_id": null
+}
+```
+
+## OCR Correction — `PATCH /api/ocr_correction`
+
+After reviewing the extraction result, engineers can submit field-level corrections using the OCR correction endpoint. Corrections are logged to the `ocr_corrections` audit table and immediately applied to the source record in the database.
+
+<ParamField body="record_type" type="string" required>
+  The type of record to correct. Must be either `"drilling_event"` (targets `historical_drilling_events`) or `"infrastructure"` (targets `underground_infrastructure`).
+</ParamField>
+
+<ParamField body="record_id" type="integer" required>
+  The `id` of the record to correct (i.e., `db_event_id` or `db_infra_id` from the upload response).
+</ParamField>
+
+<ParamField body="field_name" type="string" required>
+  The exact column name of the field to update (e.g., `"event_type"`, `"formation"`, `"cause"`).
+</ParamField>
+
+<ParamField body="old_value" type="string">
+  The incorrect value to be replaced. Optional — used for audit logging only, not for record matching.
+</ParamField>
+
+<ParamField body="new_value" type="string" required>
+  The correct replacement value.
+</ParamField>
+
+### OCR Correction Example
+
+```bash
+curl -X PATCH http://localhost:8000/api/ocr_correction \
+  -H "Content-Type: application/json" \
+  -d '{
+    "record_type": "drilling_event",
+    "record_id": 152,
+    "field_name": "event_type",
+    "old_value": "Normal",
+    "new_value": "Mud Loss"
+  }'
+```
+
+```json
+{
+  "status": "success",
+  "message": "Corrected event_type on drilling_event #152"
+}
+```
+
+<Note>
+  Corrections are applied via a direct `UPDATE` on the target table using the `field_name` as the column name. Ensure `field_name` matches an exact column name in the respective table to avoid SQL errors. Every correction is also written to the `ocr_corrections` table, building a feedback dataset that can be used to improve LLM extraction prompts over time.
+</Note>

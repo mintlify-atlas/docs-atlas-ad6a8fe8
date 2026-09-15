@@ -1,0 +1,237 @@
+---
+title: "Real-Time Stick-Slip and MSE Detection Physics Engine"
+sidebarTitle: "Physics Engine"
+description: "calculate_mse_and_stick_slip() analyzes a rolling telemetry window to detect drill string stick-slip vibrations using torque variance and RPM thresholds."
+---
+
+Stick-slip is one of the most damaging and insidious downhole vibration modes in rotary drilling. It occurs when the bit intermittently grips (sticks) and releases (slips) formation rock, causing the drill string to twist up like a spring and then snap back — generating torque spikes that can fatigue connections, damage the BHA, and in extreme cases cause catastrophic drill string twist-off. The NWIS Physics Engine detects stick-slip in real time by analysing a rolling window of live telemetry ticks delivered via WebSocket, providing immediate warnings before mechanical damage occurs.
+
+## `calculate_mse_and_stick_slip()` Function
+
+The function is defined in `nwis-historical-intelligence/src/physics_engine.py`:
+
+```python
+def calculate_mse_and_stick_slip(telemetry_window: list) -> dict:
+    """
+    Analyzes a rolling window (e.g., last 5 seconds) of telemetry data
+    to detect Stick-Slip vibrations and calculate Mechanical Specific Energy (MSE).
+    """
+    if len(telemetry_window) < 5:
+        return {"status": "insufficient_data", "is_stick_slip": False}
+
+    # Check for Stick-Slip pattern: Sharp Torque fluctuations + RPM drops
+    torques = [t.get("torque", 0) for t in telemetry_window]
+    rpms    = [t.get("rpm",    0) for t in telemetry_window]
+
+    avg_rpm        = sum(rpms)   / len(rpms)
+    torque_variance = max(torques) - min(torques)
+
+    is_stick_slip   = False
+    warning_message = None
+
+    # If torque violently swings (> 1500 variance) while avg RPM is low/dropping
+    if torque_variance > 1500 and avg_rpm < 80:
+        is_stick_slip   = True
+        warning_message = (
+            "CRITICAL: High Stick-Slip Vibration Detected. "
+            "Severe risk of drill string twist-off."
+        )
+
+    return {
+        "status":          "success",
+        "is_stick_slip":   is_stick_slip,
+        "torque_variance": round(torque_variance, 2),
+        "avg_rpm":         round(avg_rpm, 2),
+        "warning":         warning_message,
+    }
+```
+
+<ParamField path="telemetry_window" type="list" required>
+  A rolling list of telemetry tick dicts. Each tick must contain at minimum `"torque"` (kN·m) and `"rpm"` (rev/min) keys. The function requires at least 5 ticks to compute meaningful variance; fewer ticks return `{"status": "insufficient_data", "is_stick_slip": False}`.
+</ParamField>
+
+## Stick-Slip Detection Logic
+
+The detection algorithm uses two signals extracted from the telemetry window:
+
+**Torque variance** (peak-to-peak amplitude):
+```python
+torque_variance = max(torques) - min(torques)
+```
+
+**Average RPM** (window mean):
+```python
+avg_rpm = sum(rpms) / len(rpms)
+```
+
+Stick-slip is flagged when **both** conditions are satisfied simultaneously:
+
+| Condition | Threshold | Physical Meaning |
+|-----------|-----------|-----------------|
+| `torque_variance > 1500` | 1,500 kN·m | Violent torque oscillation indicating alternating grip/release |
+| `avg_rpm < 80` | 80 rev/min | Low average rotation speed — characteristic of the "stick" phase |
+
+When both conditions are true, `is_stick_slip` is set to `True` and a CRITICAL warning is issued:
+
+```
+"CRITICAL: High Stick-Slip Vibration Detected. Severe risk of drill string twist-off."
+```
+
+<Warning>
+A `warning` value of `"CRITICAL: High Stick-Slip Vibration Detected. Severe risk of drill string twist-off."` should trigger an immediate response: reduce WOB, increase RPM, or pull back off bottom. Continued drilling under severe stick-slip can lead to total drill string failure.
+</Warning>
+
+## Return Fields
+
+<ResponseField name="status" type="str">
+  `"success"` when the window has ≥ 5 ticks; `"insufficient_data"` otherwise.
+</ResponseField>
+
+<ResponseField name="is_stick_slip" type="bool">
+  `True` when both `torque_variance > 1500` AND `avg_rpm < 80`. `False` in all other cases, including insufficient data.
+</ResponseField>
+
+<ResponseField name="torque_variance" type="float">
+  Peak-to-peak torque range across the window: `max(torques) - min(torques)`, rounded to 2 decimal places.
+</ResponseField>
+
+<ResponseField name="avg_rpm" type="float">
+  Mean RPM across all ticks in the window, rounded to 2 decimal places.
+</ResponseField>
+
+<ResponseField name="warning" type="str | null">
+  CRITICAL warning string when stick-slip is detected; `null` during safe operations.
+</ResponseField>
+
+## WebSocket Integration
+
+The physics engine is invoked on every telemetry tick received via the WebSocket endpoint `ws://<host>/ws/telemetry/{well_id}`. A `ConnectionManager` instance maintains a rolling window of the last **10 ticks** per well:
+
+```python
+@app.websocket("/ws/telemetry/{well_id}")
+async def websocket_telemetry_endpoint(websocket: WebSocket, well_id: str):
+    await manager.connect(websocket, well_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            telemetry_data = json.loads(data)
+
+            # Maintain rolling window of 10 ticks
+            manager.telemetry_history[well_id].append(telemetry_data)
+            if len(manager.telemetry_history[well_id]) > 10:
+                manager.telemetry_history[well_id].pop(0)
+
+            # Physics Engine Analysis (MSE & Stick-Slip)
+            physics_insights = calculate_mse_and_stick_slip(
+                manager.telemetry_history[well_id]
+            )
+
+            # Send real-time analysis back to the dashboard
+            await websocket.send_json({"status": "live", "physics": physics_insights})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+```
+
+Each incoming tick is appended to `telemetry_history[well_id]`, the oldest tick is discarded once the window exceeds 10 entries, and the physics result is sent back immediately as a JSON frame — enabling sub-second latency alerting on the rig dashboard.
+
+## MSE Overview
+
+Mechanical Specific Energy (MSE) is the theoretical energy required to destroy a unit volume of rock. It is a leading indicator of bit efficiency: rising MSE with constant or falling ROP indicates vibration, bit wear, or formation hardening. The current implementation provides a simplified prototype MSE formula:
+
+```
+MSE = (WOB / Area) + (120π × RPM × Torque) / (Area × ROP)
+```
+
+Where `Area` is the cross-sectional area of the borehole (in m²). Full MSE calculation with bit area parameterisation is planned for a future release.
+
+## WebSocket Client Example
+
+```javascript
+// JavaScript WebSocket client for rig dashboard
+const ws = new WebSocket("ws://localhost:8000/ws/telemetry/OIL-DLJ-99");
+
+ws.onopen = () => {
+    // Send a telemetry tick every second
+    setInterval(() => {
+        ws.send(JSON.stringify({
+            depth:  2800,
+            rop:    18.5,
+            rpm:    65,       // Low RPM — approaching stick-slip threshold
+            torque: 6800,     // High torque — variance building
+            wob:    14.0
+        }));
+    }, 1000);
+};
+
+ws.onmessage = (event) => {
+    const response = JSON.parse(event.data);
+    const physics  = response.physics;
+
+    console.log("Stick-Slip:", physics.is_stick_slip);
+    console.log("Torque Variance:", physics.torque_variance);
+    console.log("Avg RPM:", physics.avg_rpm);
+
+    if (physics.warning) {
+        alert(physics.warning);  // Surface CRITICAL warning
+    }
+};
+```
+
+**Example physics response (CRITICAL):**
+
+```json
+{
+  "status": "live",
+  "physics": {
+    "status": "success",
+    "is_stick_slip": true,
+    "torque_variance": 2340.5,
+    "avg_rpm": 62.4,
+    "warning": "CRITICAL: High Stick-Slip Vibration Detected. Severe risk of drill string twist-off."
+  }
+}
+```
+
+**Example physics response (normal operations):**
+
+```json
+{
+  "status": "live",
+  "physics": {
+    "status": "success",
+    "is_stick_slip": false,
+    "torque_variance": 420.0,
+    "avg_rpm": 108.7,
+    "warning": null
+  }
+}
+```
+
+**Python WebSocket client example:**
+
+```python
+import asyncio
+import json
+import websockets
+
+async def stream_telemetry():
+    uri = "ws://localhost:8000/ws/telemetry/OIL-DLJ-99"
+    async with websockets.connect(uri) as ws:
+        for _ in range(20):
+            tick = {
+                "depth": 2800, "rop": 18.5,
+                "rpm": 65, "torque": 6800, "wob": 14.0
+            }
+            await ws.send(json.dumps(tick))
+            response = json.loads(await ws.recv())
+            physics = response["physics"]
+
+            if physics["is_stick_slip"]:
+                print(f"⚠️  STICK-SLIP DETECTED | Variance: {physics['torque_variance']} | RPM: {physics['avg_rpm']}")
+            else:
+                print(f"✅ Safe | Variance: {physics['torque_variance']} | RPM: {physics['avg_rpm']}")
+
+            await asyncio.sleep(1)
+
+asyncio.run(stream_telemetry())
+```
