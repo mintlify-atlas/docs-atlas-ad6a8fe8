@@ -1,7 +1,7 @@
 ---
 title: "OCR Document Ingestion Pipeline for Drilling Reports"
 sidebarTitle: "OCR Pipeline"
-description: "GeoMine's enterprise OCR pipeline extracts structured drilling event data from PDF, DOCX, XLSX, and image files using PyMuPDF, Tesseract, and Ollama/Gemini LLMs."
+description: "GeoMine's OCR pipeline extracts structured drilling event data from PDF, DOCX, XLSX, and image files using PyMuPDF, Tesseract, and Ollama or Gemini LLMs."
 ---
 
 Decades of drilling history in the Duliajan and Assam fields exist as scanned PDFs, legacy Word documents, and handwritten log sheets — none of it queryable by the NWIS intelligence engine. The OCR Pipeline bridges this gap by ingesting any document format, extracting raw text through a layered extraction strategy, classifying the document type, running a local or cloud LLM to produce structured JSON, enforcing schema compliance, validating coordinates and field values, and optionally writing the result directly to the `historical_drilling_events` and `underground_infrastructure` PostgreSQL tables with a full audit trail.
@@ -10,7 +10,7 @@ Decades of drilling history in the Duliajan and Assam fields exist as scanned PD
 
 <CardGroup cols={2}>
   <Card title="PDF Documents" icon="file-pdf">
-    PyMuPDF native text extraction (primary) with Tesseract OCR fallback at 200 DPI for scanned/image-only pages. Table-aware extraction included in `ocr_pipeline_ollama.py`.
+    PyMuPDF native text extraction (primary) with Tesseract OCR fallback at 150 DPI for scanned/image-only pages. Table-aware extraction included in `ocr_pipeline_ollama.py`.
   </Card>
   <Card title="Word Documents (DOCX)" icon="file-word">
     Extracts paragraphs and table cells using `python-docx`. Returns all non-empty paragraphs joined by newlines.
@@ -48,7 +48,7 @@ The enterprise pipeline (`ocr_pipeline_ollama.py`) routes files automatically us
             return extract_text_from_image(file_path)
     ```
     
-    For PDFs, native PyMuPDF `page.get_text()` is attempted first. If the page yields no text (scanned page), `_ocr_page()` is called with image pre-processing at 200 DPI.
+    For PDFs, native PyMuPDF `page.get_text()` is attempted first. If the page yields no text (scanned page), `_ocr_page()` is called with image pre-processing at 150 DPI.
   </Step>
   <Step title="Document Classification">
     The first 3,000 characters are sent to the LLM to classify the document before expensive extraction begins. Valid classes are: `drilling_report`, `completion_report`, `incident_report`, `annual_report`, `procurement`, `other`. Documents classified as `procurement` or `other` are skipped.

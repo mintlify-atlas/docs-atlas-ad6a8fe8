@@ -1,5 +1,5 @@
 ---
-title: "GeoMine System Architecture and Data Flow"
+title: "GeoMine System Architecture: ML, GIS, RAG, and API Hub"
 sidebarTitle: "Architecture"
 description: "How GeoMine's ML engine, GIS spatial filter, RAG pipeline, OCR ingestion, and Streamlit dashboard interact through the FastAPI backend hub."
 ---
@@ -56,7 +56,14 @@ Analog-well hazard counts (`stuck_pipe_count`, `mud_loss_count`, `torque_spike_c
 - **+10** per mud-loss analog (+ 8 if ML score ≥ 40)
 - **+8** per torque-spike analog (+ 5 if ML score ≥ 40)
 
-A ±1.5 jitter is added for realism and the score is capped at 99.0. Risk level thresholds are re-evaluated on the final composite score. The validated `MasterResponse` is returned.
+A ±1.5 jitter is added for realism and the score is capped at 99.0. The risk level is then re-classified on the final composite score using the thresholds below. The validated `MasterResponse` is returned.
+
+| Composite Score | Final Risk Level |
+|---|---|
+| > 75 | `CRITICAL` |
+| > 50 | `HIGH` |
+| > 30 | `MEDIUM` |
+| ≤ 30 | `SAFE` (inherited from ML base) |
 
 ## Data Layer
 
@@ -90,14 +97,18 @@ real_ml_model = joblib.load("ML/stuck_pipe_model.pkl")
 | Torque | 1,000 – 5,000 kN·m |
 | WOB | 4.0 – 20.0 klbs |
 
-**Risk level thresholds (ML base score only):**
+**ML base-score risk thresholds** (applied inside `predict_risk()` before composite scoring):
 
-| Score Range | Level | Predicted Event |
+| ML Base Score | Level | Predicted Event |
 |---|---|---|
 | > 75 | `CRITICAL` | Stuck Pipe Warning |
 | > 40 | `HIGH` | Elevated Drag |
 | > 20 | `MEDIUM` | Deviation Detected |
 | ≤ 20 | `SAFE` | Safe Operations |
+
+<Note>
+  These ML-only thresholds apply to the raw model output. After analog-well penalties are added in Step 6, the composite score is re-classified using the stricter final thresholds: **> 75 CRITICAL**, **> 50 HIGH**, **> 30 MEDIUM**. A telemetry reading that scores SAFE from the ML model alone can therefore be escalated to MEDIUM or HIGH if nearby offset wells show a history of mud loss or torque spikes.
+</Note>
 
 If `stuck_pipe_model.pkl` cannot be loaded (e.g., during a fresh environment without pre-trained weights), `predict_risk()` automatically falls back to the deterministic `predict_risk_mock()` function, which applies threshold rules directly to the raw telemetry values.
 

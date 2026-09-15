@@ -1,7 +1,7 @@
 ---
-title: "POST /api/ingest_report — Text Report Ingestion with Gemini Extraction"
+title: "POST /api/ingest_report — Gemini Text Report Ingestion"
 sidebarTitle: "POST /ingest_report"
-description: "Ingest raw drilling report text: Gemini extracts structured well_id, depth, formation, event_type, cause, mitigation, and outcome, then inserts into the historical events database."
+description: "Gemini LLM extracts seven structured fields from raw drilling report text and inserts the record into the PostgreSQL historical events table."
 ---
 
 `POST /api/ingest_report` accepts any raw drilling report as unstructured text and uses the Gemini LLM as a structured data extraction engine. The model is prompted to parse the seven canonical drilling-event fields from the free-form text and return them as a strict JSON object. The extracted record is then inserted into the `historical_drilling_events` PostgreSQL table, and the in-memory events cache is immediately invalidated so the new entry is visible to subsequent `/api/analyze_risk` and `/api/search_knowledge` calls without restarting the server.

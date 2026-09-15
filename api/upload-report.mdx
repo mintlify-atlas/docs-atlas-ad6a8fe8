@@ -1,7 +1,7 @@
 ---
 title: "POST /api/upload_report — Enterprise OCR File Upload"
 sidebarTitle: "POST /upload_report"
-description: "Upload PDF, DOCX, XLSX, or image drilling reports for automatic OCR text extraction, LLM classification, and optional database insertion via the enterprise OCR pipeline."
+description: "Upload PDF, DOCX, XLSX, or image reports for OCR extraction, LLM classification, and confidence scoring. Optionally inserts parsed records into PostgreSQL."
 ---
 
 `POST /api/upload_report` is the binary file ingestion endpoint for the NWIS enterprise OCR pipeline. Engineers upload scanned PDFs, DOCX well reports, XLSX data sheets, or raw images, and the pipeline automatically extracts text, classifies the document type, parses structured drilling-event and infrastructure fields, scores extraction confidence, and optionally inserts the parsed records directly into the PostgreSQL database. The endpoint also supports a correction feedback loop via `PATCH /api/ocr_correction` for resolving extraction errors after the fact.
@@ -40,7 +40,7 @@ This endpoint accepts `multipart/form-data`. It does **not** accept `application
 </ResponseField>
 
 <ResponseField name="drilling_event" type="object">
-  Structured drilling event fields extracted by the OCR pipeline (mirrors the `IngestPayload` extraction schema: `well_id`, `depth_m`, `formation`, `event_type`, `cause`, `mitigation`, `outcome`). `null` if no drilling event was identified.
+  Structured drilling event fields extracted by the OCR pipeline: `well_id`, `depth_m`, `formation`, `event_type`, `cause`, `mitigation`, `outcome`. `null` if no drilling event was identified.
 </ResponseField>
 
 <ResponseField name="infrastructure" type="object">

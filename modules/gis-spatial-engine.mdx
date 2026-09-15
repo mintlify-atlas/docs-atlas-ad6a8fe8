@@ -1,7 +1,7 @@
 ---
 title: "GIS Spatial Well Filtering with Haversine Distance"
 sidebarTitle: "GIS Engine"
-description: "How GeoMine uses the Haversine formula to filter offset wells within a configurable km radius around the active rig, with PostGIS geometry support."
+description: "GeoMine uses Haversine math (R=6371 km) to filter offset wells by radius, passing geographically relevant well IDs to the historical intelligence pipeline."
 ---
 
 Every NWIS risk analysis begins with a spatial question: which historical wells are close enough to the active rig to be geologically relevant? The GIS Spatial Engine answers this by computing the great-circle distance between the rig's GPS coordinates and every known well in the database. Only wells within the operator-configured search radius are passed to the Historical Intelligence Engine, ensuring that pattern analysis is always geographically constrained and that distant wells in completely different geological settings do not pollute the risk model.

@@ -1,5 +1,5 @@
 ---
-title: "Get Started with GeoMine in 5 Minutes"
+title: "Quickstart: Deploy GeoMine and Analyze Drilling Risk"
 sidebarTitle: "Quickstart"
 description: "Deploy the GeoMine NWIS stack with Docker Compose and run your first drilling risk analysis against the pre-seeded well repository."
 ---
@@ -55,8 +55,8 @@ GeoMine ships as a self-contained Docker Compose stack. A single `docker compose
 
     | Container | Service | Port | Role |
     |---|---|---|---|
-    | `geomine_db` | `db` | `5432` | PostgreSQL 15 + PostGIS. Auto-seeded on first boot from four SQL init scripts: `historical_drilling_events.sql`, `02_round2_upgrades.sql`, `rag/03_rag_embeddings.sql`, and `04_ocr_schema_upgrades.sql`. |
-    | `geomine_backend` | `backend` | `8000` | FastAPI app served by Uvicorn with `--reload`. Loads the scikit-learn model from `ML/stuck_pipe_model.pkl` at startup. |
+    | `geomine_db` | `db` | `5432` | PostgreSQL + PostGIS. Auto-seeded on first boot from four SQL init scripts: `historical_drilling_events.sql`, `02_round2_upgrades.sql`, `rag/03_rag_embeddings.sql`, and `04_ocr_schema_upgrades.sql`. |
+    | `geomine_backend` | `backend` | `8000` | FastAPI app served by Uvicorn. Loads the scikit-learn model from `ML/stuck_pipe_model.pkl` at startup. |
     | `geomine_dashboard` | `dashboard` | `8501` | Streamlit dashboard. Connects to the backend via `BACKEND_URL=http://backend:8000`. |
 
     The database seed runs automatically — no `psql` commands are needed.
@@ -129,7 +129,7 @@ GeoMine ships as a self-contained Docker Compose stack. A single `docker compose
       "ml_prediction": {
         "risk_score": 18.4,
         "risk_level": "SAFE",
-        "predicted_event": "Safe Operations"
+        "predicted_event": "None"
       },
       "historical_context": {
         "nearby_wells_analyzed": 6,
@@ -157,7 +157,7 @@ GeoMine ships as a self-contained Docker Compose stack. A single `docker compose
     }
     ```
 
-    The `ml_prediction.risk_score` is the **composite** score after adding analog-well penalties: +15 per nearby stuck-pipe event, +10 per mud-loss event, and +8 per torque-spike event.
+    The `ml_prediction.risk_score` is the **composite** score after adding analog-well penalties: +15 per nearby stuck-pipe event, +10 per mud-loss event, and +8 per torque-spike event. The final composite score is re-classified using thresholds of > 75 (`CRITICAL`), > 50 (`HIGH`), and > 30 (`MEDIUM`).
   </Step>
 </Steps>
 

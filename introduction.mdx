@@ -1,7 +1,7 @@
 ---
-title: "GeoMine: Real-Time Drilling Risk Intelligence Platform"
+title: "GeoMine: AI-Powered Drilling Risk Intelligence Platform"
 sidebarTitle: "Introduction"
-description: "GeoMine (NWIS) combines ML risk scoring, RAG historical intelligence, GIS spatial filtering, and Gemini AI to prevent stuck pipe and other downhole hazards."
+description: "GeoMine (NWIS) combines ML risk scoring, RAG historical intelligence, GIS spatial filtering, and Gemini AI to prevent stuck pipe and downhole hazards."
 ---
 
 GeoMine, powered by the **Nearby Wells Intelligence System (NWIS)**, is an AI-driven drilling risk platform built for oil and gas operations. Every time a drill bit advances, it faces invisible hazards encoded in the geology and the history of every offset well drilled nearby. Stuck pipe incidents, mud circulation losses, torque spikes, and gas kicks can each cost tens of thousands of dollars per hour in Non-Productive Time (NPT). GeoMine eliminates that blind spot: it ingests live rig telemetry, scores it with a trained scikit-learn model, cross-references it against a spatially indexed repository of historical drilling events, and synthesises a Gemini AI narrative — all in one API call — so drilling engineers receive actionable intelligence before an incident escalates.
@@ -45,7 +45,7 @@ GeoMine classifies downhole hazards into four primary event categories, each dra
 |---|---|
 | **Stuck Pipe** | The drill string becomes immovable due to differential pressure, pack-off, or wellbore collapse. The most costly drilling hazard; GeoMine issues `CRITICAL` alerts when the composite risk score exceeds 75. |
 | **Mud Loss** | Drilling fluid escapes into a porous or fractured formation (e.g., Barail Coal-Shale), reducing hydrostatic pressure and risking a well-control event. Detected via abnormal pump-pressure trends and confirmed by historical analog matches. |
-| **Torque Spike** | A sudden surge in rotary torque indicating borehole friction, ledges, or key-seating. GeoMine flags over-torque conditions (> 6,500 kN·m in mock mode) as immediate `CRITICAL` anomalies. |
+| **Torque Spike** | A sudden surge in rotary torque indicating borehole friction, ledges, or key-seating. GeoMine flags over-torque conditions (torque > 6,500 kN·m in mock mode) as immediate `CRITICAL` anomalies. |
 | **Gas Kick** | An influx of formation gas into the wellbore, a precursor to a blowout. Classified alongside stuck-pipe events in the RAG evidence layer and escalated to `CRITICAL` risk level. |
 
 ## System Requirements
@@ -54,7 +54,7 @@ Before deploying GeoMine, confirm your environment meets these prerequisites.
 
 | Requirement | Details |
 |---|---|
-| **Python** | 3.12 (as specified in the Docker images; 3.x compatible for local development) |
+| **Python** | 3.10 or later (3.12 used in Docker images) |
 | **Docker & Docker Compose** | Docker Engine 20.x or later; Compose v3.8 spec |
 | **Gemini API Key** | A valid `GEMINI_API_KEY` from Google AI Studio for Gemini LLM and embedding features |
 | **PostgreSQL + PostGIS** | Provided automatically via the `db` container (auto-seeded on first boot); PostGIS required for geometry columns |

@@ -73,7 +73,7 @@ Stick-slip is flagged when **both** conditions are satisfied simultaneously:
 
 When both conditions are true, `is_stick_slip` is set to `True` and a CRITICAL warning is issued:
 
-```
+```text
 "CRITICAL: High Stick-Slip Vibration Detected. Severe risk of drill string twist-off."
 ```
 
@@ -138,7 +138,7 @@ Each incoming tick is appended to `telemetry_history[well_id]`, the oldest tick 
 
 Mechanical Specific Energy (MSE) is the theoretical energy required to destroy a unit volume of rock. It is a leading indicator of bit efficiency: rising MSE with constant or falling ROP indicates vibration, bit wear, or formation hardening. The current implementation provides a simplified prototype MSE formula:
 
-```
+```text
 MSE = (WOB / Area) + (120π × RPM × Torque) / (Area × ROP)
 ```
 

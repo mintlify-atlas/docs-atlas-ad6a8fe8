@@ -1,7 +1,7 @@
 ---
 title: "Searchable Drilling Knowledge Repository with NLP Search"
 sidebarTitle: "Knowledge Repository"
-description: "Tab 5 of the GeoMine dashboard provides natural language search over the historical drilling events database using RAG and Gemini, returning evidence-ranked incident records."
+description: "GeoMine Tab 5: natural language RAG search over historical drilling events, proximity-aware filtering, incident cards, and document ingestion via Gemini."
 ---
 
 The **Searchable Knowledge Repository** (Tab 5) transforms the historical drilling events database into a queryable intelligence asset. Rather than filtering a static table, engineers ask questions in plain English — the backend parses the intent using Gemini NLP, performs a hybrid vector-and-keyword RAG search over the PostgreSQL knowledge base, and returns incident records ranked by relevance score. Each result is expandable to reveal root cause, mitigation applied, and operational outcome. A **Historical Inference** synthesis at the end of each result set extracts cross-incident patterns using Gemini, surfacing the geological and operational lessons that span multiple events.
@@ -14,25 +14,25 @@ The search interface accepts any free-form drilling question. Engineers do not n
 
 Below are representative queries demonstrating the range of intelligence the repository can surface:
 
-```
+```text
 What Gas Kicks happened at 2800m in Kopili Shale?
 ```
-```
+```text
 Show stuck pipe incidents above 3000m
 ```
-```
+```text
 Which wells had mud losses in Barail Coal-Shale?
 ```
-```
+```text
 What mitigations were used for torque spikes in Formation X?
 ```
-```
+```text
 Were there any differential sticking events near 2780m in the Duliajan field?
 ```
-```
+```text
 What caused the pack-off incidents between 2750m and 2850m?
 ```
-```
+```text
 Show all high-risk events nearby in the last corridor
 ```
 
@@ -89,7 +89,7 @@ requests.post(
 
 Each retrieved incident is displayed as a collapsible card, sorted by relevance score descending. The card label line shows:
 
-```
+```text
 {icon}  {well_id} — {event_type}  |  Depth: {depth_m} m  |  Relevance: {score:.2f}%  |  Δ{depth_difference_m:.0f} m from query depth
 ```
 
@@ -136,7 +136,7 @@ else:
 
 The extracted inference is displayed in a teal-bordered card:
 
-```
+```text
 Historical Inference:
 ┌─────────────────────────────────────────────────────────────┐
 │  {Gemini synthesis of patterns across all returned events}  │
@@ -157,7 +157,7 @@ When search results are returned, a row of metric cards appears above the incide
 
 **When a dominant event type exists** (one event type strictly outnumbers all others — no ties):
 
-```
+```text
 ┌──────────────────┬─────────────────┬──────────────────┬──────────────┐
 │ Incidents Found  │  Unique Wells   │  Dominant Event  │   Avg Depth  │
 │       12         │       9         │   Stuck Pipe     │   2,798.3 m  │
@@ -166,7 +166,7 @@ When search results are returned, a row of metric cards appears above the incide
 
 **When event types are tied or no clear dominant type** (three-column layout, Dominant Event omitted):
 
-```
+```text
 ┌──────────────────┬─────────────────┬──────────────┐
 │ Incidents Found  │  Unique Wells   │   Avg Depth  │
 │        8         │        6        │   2,801.5 m  │
@@ -197,7 +197,7 @@ Tab 5 also exposes an **Automated Document Ingestion** expander at the top of th
   <Step title="Paste raw report text">
     Copy and paste the content of a Daily Drilling Report (DDR), Well Completion Report, or any relevant field note into the text area. Example:
 
-    ```
+    ```text
     On 12-Oct, Well OIL-ABC-99 experienced a severe stuck pipe at 2650m
     in the Barail Sandstone due to differential sticking. Spotted 50bbl
     of pipe laxative to free string...
@@ -220,7 +220,7 @@ Tab 5 also exposes an **Automated Document Ingestion** expander at the top of th
 
 The knowledge search is powered by a dedicated API endpoint:
 
-```
+```text
 POST /api/search_knowledge
 ```
 

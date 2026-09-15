@@ -1,7 +1,7 @@
 ---
-title: "POST /api/environmental_risk — Environmental and Infrastructure Risk"
+title: "POST /api/environmental_risk — Infrastructure Risk Check"
 sidebarTitle: "POST /environmental_risk"
-description: "Assesses environmental and underground infrastructure risks (aquifers, gas pipelines) at the drilling location and current depth using the environmental risk engine."
+description: "Checks whether the current drill depth intersects known aquifer or gas pipeline zones. Returns SAFE or CRITICAL risk level with per-hazard warning strings."
 ---
 
 `POST /api/environmental_risk` evaluates whether the current drill path is approaching or intersecting known underground environmental hazards — specifically aquifer zones and high-pressure gas pipelines. The engine in `environmental_engine.py` performs a simplified 3D proximity check, comparing the current drilling depth against the registered depth of each infrastructure item. When the depth difference falls within a critical threshold, the assessment escalates to `CRITICAL` and a descriptive warning is added to the response. This endpoint is designed to be called continuously as the bit advances deeper.

@@ -1,7 +1,7 @@
 ---
 title: "Configuring Drilling Telemetry and Analysis Parameters"
 sidebarTitle: "Telemetry Controls"
-description: "How to configure the sidebar drilling parameters — formation, search radius, depth corridor, ROP, RPM, torque, WOB — and trigger a risk analysis in the GeoMine dashboard."
+description: "Configure the GeoMine sidebar form: formation zone, search radius, depth corridor, ROP, RPM, torque, and WOB inputs to trigger a drilling risk analysis."
 ---
 
 The GeoMine dashboard sidebar hosts a single persistent `st.form` that consolidates every input needed to characterize the current drilling situation: geological zone selection, spatial search geometry, live surface sensor readings, and the AI toggle. Grouping all controls inside a form means Streamlit only re-runs the backend analysis when the engineer explicitly clicks **Run Drilling Risk Analysis** — slider and input changes are buffered locally until that moment, preventing unnecessary API calls on every minor adjustment.
@@ -16,7 +16,7 @@ The top section of the sidebar form configures the geological and geographic sco
 
 A selectbox filtering offset wells by their formation logged at 2,780 m depth. Only wells whose `formation_at_2780` field matches the selected value are included in the corridor analysis.
 
-```
+```text
 Options: ["All", "Kopili Shale", "Girujan Clay", "Barail Coal-Shale", "Lakadong-Therria"]
 Default: "All" (index 0)
 ```
@@ -27,7 +27,7 @@ Selecting `All` disables formation filtering and returns every nearby well withi
 
 A continuous slider controlling the geographic search perimeter around the active rig's GPS coordinates. The GIS engine computes Haversine distance from the active well to every offset well in the repository and includes only those within this radius.
 
-```
+```text
 Min: 1.0 km   Max: 50.0 km   Step: 0.5 km
 Session state key: radius_km_slider
 Default (on first load): 5.0 km
@@ -39,7 +39,7 @@ The active radius value is persisted in `st.session_state["radius_km_slider"]` s
 
 A slider setting the depth window around the current bit depth. Offset wells whose `event_md` (incident measured depth) falls within `current_depth ± depth_window` are included as valid historical analogs.
 
-```
+```text
 Min: 30 m   Max: 150 m   Step: 10 m   Default: 80.0 m
 ```
 
@@ -71,7 +71,7 @@ All five sensor inputs use `step` values that match field instrumentation resolu
 
 Beneath the sensor inputs, a **Performance Controls** section contains a single checkbox:
 
-```
+```text
 ☐  Generate AI Risk Summary (Adds ~5s latency)
 Default: unchecked
 ```

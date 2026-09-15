@@ -1,7 +1,7 @@
 ---
-title: "Stuck Pipe ML Risk Scoring Engine"
+title: "ML Risk Engine: Stuck Pipe Scoring and Classification"
 sidebarTitle: "ML Risk Engine"
-description: "How GeoMine's scikit-learn classifier scores live drilling telemetry for stuck pipe risk using 5 input features, with Safe Operating Envelope logic and composite risk merging."
+description: "GeoMine's scikit-learn classifier scores drilling telemetry for stuck pipe risk using five features, Safe Operating Envelope overrides, and analog scoring."
 ---
 
 GeoMine's ML Risk Engine is the primary real-time decision layer inside the `/api/analyze_risk` pipeline. On every telemetry submission, the engine feeds five live drilling parameters — depth, ROP, RPM, torque, and WOB — into a pre-trained scikit-learn binary classifier that was trained on historical stuck-pipe incidents from the Duliajan field. The classifier returns a probability that is immediately scaled to a 0–99 risk score, classified into one of four hazard levels, and then further merged with spatial analog evidence from offset wells to produce the final composite score that drives the dashboard.

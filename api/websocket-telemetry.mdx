@@ -1,7 +1,7 @@
 ---
 title: "WS /ws/telemetry/{well_id} — Real-Time Telemetry WebSocket"
 sidebarTitle: "WS /ws/telemetry"
-description: "Real-time bidirectional WebSocket stream for live drilling telemetry. The server applies the physics engine on every tick to detect Mechanical Specific Energy anomalies and Stick-Slip vibrations."
+description: "Persistent WebSocket for live rig telemetry. Physics engine detects stick-slip vibration and torque variance on every tick using a 10-frame rolling window."
 ---
 
 `WS /ws/telemetry/{well_id}` is a persistent WebSocket connection that enables real-time, bidirectional drilling data exchange between the rig's data acquisition system and the NWIS backend. The client sends individual telemetry frames as JSON text, and the server responds on every tick with a live physics analysis computed by `calculate_mse_and_stick_slip()`. The server maintains a rolling window of the last 10 telemetry ticks per well and uses it to detect Stick-Slip vibrations — one of the leading causes of drill string twist-off.
@@ -10,7 +10,7 @@ description: "Real-time bidirectional WebSocket stream for live drilling telemet
 
 **WebSocket URL:**
 
-```
+```text
 ws://localhost:8000/ws/telemetry/{well_id}
 ```
 

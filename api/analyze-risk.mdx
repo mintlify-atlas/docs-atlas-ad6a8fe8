@@ -1,7 +1,7 @@
 ---
 title: "POST /api/analyze_risk — Core Drilling Risk Orchestrator"
 sidebarTitle: "POST /analyze_risk"
-description: "Analyzes live drilling telemetry through ML risk scoring, GIS spatial filtering, and RAG historical intelligence to return a composite risk assessment and offset well map data."
+description: "Submit live rig telemetry to get ML risk scoring, GIS-filtered offset well analysis, and Gemini RAG intelligence in a single composite MasterResponse."
 ---
 
 `POST /api/analyze_risk` is the primary orchestration endpoint of the NWIS Backend Hub. A single call triggers three sequential engines: the **ML Risk Engine** (a trained stuck-pipe classifier returning a 0–99 probability score), the **GIS Spatial Filter** (Haversine-based radius query over the PostgreSQL events database), and the **Gemini Historical Intelligence Engine** (RAG pattern analysis with optional LLM narrative generation). The composite result includes a final risk level, event prediction, evidence string, and a sorted list of offset well map markers ready for the front-end dashboard.
@@ -51,7 +51,7 @@ description: "Analyzes live drilling telemetry through ML risk scoring, GIS spat
 </ParamField>
 
 <ParamField body="torque" type="float" required>
-  Surface Torque in ft-lbs. Values above 5000 trigger HIGH risk; above 6500 trigger CRITICAL over-torque classification.
+  Surface Torque in kN·m. In mock mode, values above 5000 trigger HIGH risk and values above 6500 trigger CRITICAL over-torque classification.
 
   **Constraint:** `ge=0`
 </ParamField>
@@ -228,7 +228,18 @@ Each element in the `offset_wells_map_data` array has the following fields:
 
 ## Risk Level Thresholds
 
-The final `risk_score` (after ML output + analog well penalties) is mapped to a `risk_level` band:
+Risk classification happens in two stages inside the endpoint.
+
+**Stage 1 — ML model initial classification** (applied to the raw `predict_risk()` output before analog well penalties are added):
+
+| risk_score range | risk_level | Predicted Event |
+|------------------|------------|-----------------|
+| > 75 | `CRITICAL` | Stuck Pipe Warning |
+| > 40 | `HIGH` | Elevated Drag |
+| > 20 | `MEDIUM` | Deviation Detected |
+| ≤ 20 | `SAFE` | Safe Operations |
+
+**Stage 2 — Composite re-classification** (applied to the final `risk_score` after analog well penalties from nearby offset wells are added):
 
 | risk_score range | risk_level | Recommended Response |
 |------------------|------------|----------------------|
@@ -236,6 +247,10 @@ The final `risk_score` (after ML output + analog well penalties) is mapped to a 
 | > 50 | `HIGH` | Alert driller, prepare contingency |
 | > 30 | `MEDIUM` | Monitor closely, adjust parameters |
 | ≤ 30 | `SAFE` | Continue standard operations |
+
+<Note>
+  The Stage 2 thresholds are deliberately tighter than Stage 1 — an analog-risk penalty from multiple nearby stuck-pipe wells can elevate a `MEDIUM` ML score to `HIGH` or `CRITICAL` in the final composite result. The `risk_level` in `MasterResponse.ml_prediction` always reflects the Stage 2 composite classification.
+</Note>
 
 <Note>
   Set `enable_ai: false` for approximately **5× faster responses**. This bypasses the Gemini LLM call entirely and returns a static placeholder in `evidence_string`. All ML scoring, GIS filtering, and offset well map data are still computed and returned. This mode is recommended for high-frequency polling or automated monitoring dashboards where narrative text is not required on every tick.

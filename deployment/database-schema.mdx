@@ -1,7 +1,7 @@
 ---
-title: "GeoMine PostgreSQL Database Schema Reference"
+title: "GeoMine nwis_wells_db Full PostgreSQL Database Schema"
 sidebarTitle: "Database Schema"
-description: "Reference for all PostgreSQL tables in nwis_wells_db: historical_drilling_events, underground_infrastructure, rag_embeddings, ocr_corrections, mitigation_workflows, and npt data."
+description: "Schema reference for nwis_wells_db: drilling events, underground infrastructure, vector embeddings, OCR corrections, and processed file tracking tables."
 ---
 
 GeoMine stores all drilling intelligence in a single PostgreSQL database named `nwis_wells_db`. The schema is built incrementally across four SQL initialisation files that PostgreSQL executes in order when the `geomine_db` container boots for the first time. The database relies on two extensions — PostGIS for geospatial indexing of well coordinates and pgvector for vector-similarity search across drilling event embeddings.

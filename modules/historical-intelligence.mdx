@@ -1,7 +1,7 @@
 ---
-title: "NWIS Historical Drilling Intelligence Engine"
+title: "Historical Drilling Intelligence and Evidence Engine"
 sidebarTitle: "Historical Intelligence"
-description: "The analyze_well() function coordinates search, pattern analysis, and evidence generation over historical offset well events to surface relevant analog incidents."
+description: "analyze_well() coordinates search, pattern analysis, and evidence generation over offset well events to surface ranked analog incidents for risk decisions."
 ---
 
 The Historical Intelligence Engine transforms a raw pool of offset well drilling events into structured, ranked, and traceable intelligence that informs real-time risk decisions. It is the core analytical layer of the NWIS platform, sitting between the GIS spatial filter and the Gemini AI explanation layer. The engine is entirely deterministic — every result can be traced back to a specific field value in the historical database — making it auditable by drilling engineers without requiring knowledge of machine learning.

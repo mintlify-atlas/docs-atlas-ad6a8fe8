@@ -1,7 +1,7 @@
 ---
-title: "GeoMine API Reference — NWIS Backend Hub"
+title: "GeoMine NWIS Backend API Reference — Endpoint Overview"
 sidebarTitle: "Overview"
-description: "Overview of all GeoMine NWIS REST endpoints: risk analysis, knowledge search, OCR ingestion, NPT analytics, environmental risk, HITL mitigation queue, and WebSocket telemetry."
+description: "GeoMine NWIS API hub: ML risk scoring, RAG knowledge search, OCR ingestion, NPT cost analytics, environmental risk, HITL queue, and WebSocket telemetry."
 ---
 
 GeoMine's **NWIS Backend Hub** is a FastAPI-powered backend that wires together ML risk scoring, GIS spatial filtering, Gemini-powered RAG historical intelligence, enterprise OCR ingestion, real-time WebSocket telemetry, and a Human-in-the-Loop mitigation approval queue into one coherent drilling risk platform. The application is titled `"NWIS Backend Hub"` and exposes all endpoints under the `/api/` prefix, with the exception of the health check at `GET /`. The base URL for all requests is `http://localhost:8000`.
@@ -10,7 +10,7 @@ GeoMine's **NWIS Backend Hub** is a FastAPI-powered backend that wires together 
 
 No authentication is required in the current version of the API. CORS middleware is configured with `allow_origins=["*"]`, meaning requests from any origin are accepted. All HTTP methods and headers are permitted.
 
-```
+```http
 Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: *
 Access-Control-Allow-Headers: *

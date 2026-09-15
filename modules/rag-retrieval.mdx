@@ -1,7 +1,7 @@
 ---
 title: "RAG Historical Event Retrieval with Gemini Embeddings"
 sidebarTitle: "RAG Retrieval"
-description: "GeoMine's RAGRetrievalService supports in-memory and pgvector backends using Gemini text-embedding-004 to retrieve semantically relevant historical drilling events."
+description: "GeoMine's RAGRetrievalService uses Gemini embeddings to retrieve semantically matched historical drilling incidents across in-memory and pgvector backends."
 ---
 
 Keyword-based search misses critical analog incidents where the same underlying cause is described with different terminology across different reports. GeoMine's Retrieval-Augmented Generation (RAG) layer closes this gap by converting historical drilling events into dense vector embeddings and finding the most semantically similar incidents to the operator's free-text query — regardless of exact phrasing. The retrieved evidence is then passed to `HistoricalAnswerGenerator` to produce grounded, hallucination-resistant answers that cite only real records from the database.
@@ -164,7 +164,7 @@ print(f"Ingested {ingested} documents")
 
 Both backends ultimately use `HybridRetriever` (or equivalent pgvector scoring) to rank results by a weighted combination of **semantic similarity** and **structured score**:
 
-```
+```text
 hybrid_score = SEMANTIC_WEIGHT × semantic_norm + STRUCTURED_WEIGHT × structured_score
 ```
 

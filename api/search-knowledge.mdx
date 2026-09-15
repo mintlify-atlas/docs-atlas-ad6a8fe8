@@ -1,7 +1,7 @@
 ---
 title: "POST /api/search_knowledge — RAG Drilling Knowledge Search"
 sidebarTitle: "POST /search_knowledge"
-description: "Natural language search over the historical drilling events database using Gemini embeddings and hybrid RAG retrieval, with optional proximity-based filtering."
+description: "Plain-English Gemini RAG search over drilling history. Auto-applies a geo-radius filter when proximity keywords are detected in the query text."
 ---
 
 `POST /api/search_knowledge` exposes the NWIS RAG (Retrieval-Augmented Generation) pipeline as a conversational search interface for drilling engineers. Submit any natural-language question about historical drilling hazards, formations, or well performance, and the endpoint retrieves the most semantically relevant events using Gemini embeddings (with an optional pgvector backend), then synthesises a structured answer via the `HistoricalQueryService`. When the question contains proximity keywords such as `"nearby"` or `"this area"`, results are automatically scoped to the offset wells within the specified radius.

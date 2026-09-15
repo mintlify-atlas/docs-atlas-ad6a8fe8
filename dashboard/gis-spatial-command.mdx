@@ -1,7 +1,7 @@
 ---
-title: "GIS Spatial Command: Interactive Offset Well Map"
-sidebarTitle: "GIS Map"
-description: "The GIS Spatial Command tab renders an interactive Folium map showing the active rig, nearby offset wells color-coded by incident type, and a search radius circle."
+title: "GIS Spatial Command: Offset Well Map & Analog Panel"
+sidebarTitle: "GIS Spatial"
+description: "GIS Spatial Command tab: interactive PyDeck/Folium map of the active rig and offset wells color-coded by incident type, with Top Analog Matches panel."
 ---
 
 The **GIS Spatial Command** tab is the primary situational awareness screen in the NWIS dashboard. It renders a georeferenced map of the active drilling rig and every retrieved offset well within the configured search radius and depth corridor, with each well marker color-coded by its historical incident type. Alongside the map, a ranked **Top Analog Offset Matches** panel surfaces the four most similar offset wells with their full engineering metadata, giving drillers an immediate spatial and geological risk picture without leaving the main view.
@@ -79,7 +79,7 @@ Each card shows:
 
 If no offset wells are returned for the current search parameters, the panel displays an info message:
 
-```
+```text
 ℹ️ No offset wells found in this search radius and depth corridor.
    Try increasing the buffer radius.
 ```
@@ -104,6 +104,32 @@ The `offset_wells_map_data` array (stored in `historical_context` within `st.ses
 | `event_note` | `str` | Free-text engineering remark describing the incident context |
 
 The `distance_km` field is calculated by the `haversine_km()` function in `gis_engine.py` using the standard Haversine formula with Earth radius 6,371 km.
+
+---
+
+## Event Type Classification
+
+Before offset wells are rendered, the backend normalizes raw event labels from the PostgreSQL knowledge base into four canonical UI categories. The mapping logic applied in `main.py` is:
+
+```python
+raw_event = str(w.get("event_type", ""))
+ui_event = (
+    "None"        if "Normal" in raw_event
+    else "Torque Spike" if "Torque" in raw_event
+    else "Mud Loss"     if "Shale" in raw_event or "Mud" in raw_event or "Loss" in raw_event
+    else "Stuck Pipe"   if "Stuck" in raw_event or "Gas" in raw_event or "Kick" in raw_event
+    else raw_event
+)
+```
+
+| Raw `event_type` (database value) | Normalized UI `event_type` |
+|---|---|
+| `Normal Operation`, `Normal` | `None` |
+| `Torque Spike` | `Torque Spike` |
+| `Shale Instability`, `Severe Mud Loss`, `Mud Loss` | `Mud Loss` |
+| `Stuck Pipe Incident`, `Gas Kick`, `Kick` | `Stuck Pipe` |
+
+This normalization ensures consistent color coding and severity sorting across the map, analog panel, and trend charts regardless of the verbosity of the original DDR record.
 
 ---
 
@@ -157,7 +183,7 @@ The **Offset Records & Deep-Dive** tab (Tab 2) provides a CSV export of the full
 
 The filename is auto-generated as:
 
-```
+```text
 nwis_offset_wells_{active_well_name}_{bit_depth}m.csv
 ```
 

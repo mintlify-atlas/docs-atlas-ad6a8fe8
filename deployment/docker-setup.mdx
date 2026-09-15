@@ -1,7 +1,7 @@
 ---
-title: "Deploy GeoMine with Docker Compose"
+title: "Deploy the Complete GeoMine Stack with Docker Compose"
 sidebarTitle: "Docker Setup"
-description: "Run the full GeoMine stack — PostgreSQL+PostGIS, FastAPI backend, and Streamlit dashboard — with Docker Compose in three commands."
+description: "Spin up GeoMine's PostgreSQL+PostGIS database, FastAPI backend, and Streamlit dashboard with a single Docker Compose command on any machine."
 ---
 
 GeoMine ships as a fully containerised stack. A single `docker-compose.yml` file orchestrates three services — a PostGIS-enabled PostgreSQL database, a FastAPI backend, and a Streamlit dashboard — and automatically seeds the database with historical drilling events, RAG embeddings schema, and OCR upgrade tables on first boot. No manual database setup is required.
@@ -169,7 +169,7 @@ The `db` service mounts four SQL files into PostgreSQL's `docker-entrypoint-init
 
 After startup, verify each service with these commands:
 
-**FastAPI backend** — should return the status banner:
+**FastAPI backend** — should return the status JSON:
 
 ```bash
 curl http://localhost:8000/
@@ -177,13 +177,13 @@ curl http://localhost:8000/
 
 Expected response:
 
-```
-NWIS Backend is ONLINE
+```json
+{"status": "NWIS Backend is ONLINE and ready."}
 ```
 
 **Streamlit dashboard** — open your browser and navigate to:
 
-```
+```text
 http://localhost:8501
 ```
 

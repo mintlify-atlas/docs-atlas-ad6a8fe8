@@ -1,7 +1,7 @@
 ---
-title: "GeoMine Environment Variables Reference"
+title: "GeoMine Backend and Dashboard Environment Variables"
 sidebarTitle: "Environment Variables"
-description: "Complete reference for all environment variables used by the GeoMine backend and dashboard, including database connection, Gemini API, and RAG backend configuration."
+description: "Reference for all GeoMine environment variables: database connection, Gemini API key and model, RAG backend mode, Ollama URL, and dashboard settings."
 ---
 
 GeoMine's backend and dashboard are configured entirely through environment variables — no hard-coded secrets or host-specific paths. When deployed via Docker Compose, these variables are injected directly in `docker-compose.yml`. For local development, you can export them in your shell or place them in a `.env` file that `python-dotenv` picks up automatically.
@@ -13,7 +13,7 @@ These variables are read by the FastAPI backend (`main:app`) at startup. In the 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GEMINI_API_KEY` | *(none)* | Google Gemini API key. Required for live AI risk scoring, RAG queries, and Gemini-powered embeddings. Omit to run in offline mode. |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model name passed to the `google-genai` SDK. Swap for any available Gemini model variant without code changes. |
+| `GEMINI_MODEL` | `gemini-2.0-flash-lite` | Gemini model name passed to the `google-genai` SDK. Swap for any available Gemini model variant without code changes. |
 | `RAG_BACKEND` | `in_memory` | RAG retrieval mode. Accepted values: `in_memory` (uses local JSON cache) or `pgvector` (queries the `historical_event_embeddings` table). See [RAG_BACKEND Modes](#rag_backend-modes) below. |
 | `DB_HOST` | `db` (Docker) / `127.0.0.1` (local) | PostgreSQL hostname. In Docker Compose this is the service name `db`; for local development use `127.0.0.1` or your database server's address. |
 | `DB_USER` | `postgres` | PostgreSQL username. |
@@ -47,7 +47,7 @@ For local development, create a `.env` file in the project root. Both `python-do
 
 # --- Gemini AI ---
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_MODEL=gemini-2.0-flash-lite
 
 # --- RAG Backend ---
 RAG_BACKEND=in_memory
